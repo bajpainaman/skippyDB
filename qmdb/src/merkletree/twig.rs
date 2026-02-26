@@ -110,6 +110,81 @@ pub fn sync_mtree(mtree: &mut TwigMT, start: i32, end: i32) {
     }
 }
 
+/// GPU-batched sync_mtree: processes multiple twig mtrees in a single GPU dispatch.
+/// Each mtree is a [Hash32; 4096] array where leaves are at indices 2048..4096.
+/// This function computes all internal nodes from the leaves bottom-up.
+///
+/// `mtrees`: list of (mtree, start, end) tuples — same semantics as `sync_mtree`.
+#[cfg(feature = "cuda")]
+pub fn sync_mtrees_gpu(
+    gpu: &crate::gpu::GpuHasher,
+    mtrees: &mut [(&mut TwigMT, i32, i32)],
+) {
+    use crate::gpu::NodeHashJob;
+
+    if mtrees.is_empty() {
+        return;
+    }
+
+    // Process level by level, batching all twigs at each level
+    let mut level: u8 = 0;
+    let mut base = LEAF_COUNT_IN_TWIG as i32;
+
+    // Track per-twig start/end ranges
+    let mut ranges: Vec<(i32, i32)> = mtrees
+        .iter()
+        .map(|(_, s, e)| (*s, *e))
+        .collect();
+
+    while base >= 2 {
+        // Collect all jobs for this level across all twigs
+        let mut jobs = Vec::new();
+        // Track where each result goes: (twig_index, target_index_in_mtree)
+        let mut targets: Vec<(usize, usize)> = Vec::new();
+
+        for (twig_idx, (ref mtree, _, _)) in mtrees.iter().enumerate() {
+            let (cur_start, cur_end) = ranges[twig_idx];
+            let mut end_round = cur_end;
+            if cur_end % 2 == 1 {
+                end_round += 1;
+            }
+            let mut j = (cur_start >> 1) << 1;
+            while j <= end_round && j + 1 < base {
+                let i = (base + j) as usize;
+                let mut left = [0u8; 32];
+                let mut right = [0u8; 32];
+                left.copy_from_slice(&mtree[i]);
+                right.copy_from_slice(&mtree[i + 1]);
+                jobs.push(NodeHashJob {
+                    level,
+                    left,
+                    right,
+                });
+                targets.push((twig_idx, i / 2));
+                j += 2;
+            }
+        }
+
+        if !jobs.is_empty() {
+            // Batch hash on GPU
+            let results = gpu.batch_node_hash(&jobs);
+
+            // Scatter results back
+            for (result_idx, (twig_idx, target_idx)) in targets.iter().enumerate() {
+                mtrees[*twig_idx].0[*target_idx].copy_from_slice(&results[result_idx]);
+            }
+        }
+
+        // Advance ranges for next level
+        for range in ranges.iter_mut() {
+            range.0 >>= 1;
+            range.1 >>= 1;
+        }
+        level += 1;
+        base >>= 1;
+    }
+}
+
 impl Default for Twig {
     fn default() -> Self {
         Self::new()
