@@ -6,6 +6,8 @@ pub mod def;
 pub mod dioprefetcher;
 pub mod entryfile;
 pub mod flusher;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 pub mod indexer;
 pub mod merkletree;
 pub mod metadb;
@@ -46,6 +48,8 @@ use crate::merkletree::{
     Tree,
 };
 use crate::metadb::{MetaDB, MetaInfo};
+#[cfg(feature = "cuda")]
+use crate::gpu::GpuHasher;
 use log::{debug, error, info};
 
 #[cfg(all(target_os = "linux", feature = "directio"))]
@@ -67,6 +71,8 @@ pub struct AdsCore {
     meta: Arc<RwLock<MetaDB>>,
     wrbuf_size: usize,
     proof_req_senders: Vec<SyncSender<ProofReqElem>>,
+    #[cfg(feature = "cuda")]
+    gpu_hasher: Option<Arc<GpuHasher>>,
 }
 
 fn get_ciphers(
@@ -180,6 +186,19 @@ impl AdsCore {
             eb_sender,
         );
 
+        // Initialize GPU hasher if cuda feature is enabled
+        #[cfg(feature = "cuda")]
+        let gpu_hasher = match GpuHasher::new(200_000) {
+            Ok(g) => {
+                info!("CUDA GPU hasher initialized successfully");
+                Some(Arc::new(g))
+            }
+            Err(e) => {
+                info!("CUDA GPU hasher unavailable, falling back to CPU: {}", e);
+                None
+            }
+        };
+
         let ads_core = Self {
             task_hub,
             task_senders: Vec::with_capacity(1),
@@ -188,6 +207,8 @@ impl AdsCore {
             meta: meta.clone(),
             wrbuf_size,
             proof_req_senders: flusher.get_proof_req_senders(),
+            #[cfg(feature = "cuda")]
+            gpu_hasher,
         };
         (ads_core, eb_receiver, flusher)
     }
@@ -610,7 +631,18 @@ impl AdsCore {
         );
         prefetcher.start_threads(task_receiver);
         drop(meta);
+
+        #[cfg(feature = "cuda")]
+        let gpu_hasher = self.gpu_hasher.clone();
+
         thread::spawn(move || {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(gpu) = gpu_hasher {
+                    flusher.flush_gpu(SHARD_COUNT, gpu);
+                    return;
+                }
+            }
             flusher.flush(SHARD_COUNT);
         });
     }

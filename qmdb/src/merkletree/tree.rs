@@ -357,6 +357,224 @@ impl UpperTree {
 
         new_list
     }
+
+    /// GPU-accelerated sync_nodes_by_level.
+    /// Batches all node hashes at a given level into a single GPU dispatch.
+    #[cfg(feature = "cuda")]
+    pub fn sync_nodes_by_level_gpu(
+        &mut self,
+        gpu: &crate::gpu::GpuHasher,
+        level: i64,
+        n_list: Vec<u64>,
+        youngest_twig_id: u64,
+    ) -> Vec<u64> {
+        use crate::gpu::NodeHashJob;
+
+        let max_n = max_n_at_level(youngest_twig_id, level);
+        let pos = NodePos::pos(level as u64, max_n);
+        self.set_node_copy(pos, &NULL_NODE_IN_HIGHER_TREE[level as usize]);
+        let pos = NodePos::pos(level as u64, max_n + 1);
+        self.set_node_copy(pos, &NULL_NODE_IN_HIGHER_TREE[level as usize]);
+
+        // Collect all hash jobs for this level
+        let mut jobs = Vec::with_capacity(n_list.len());
+        let mut job_positions: Vec<NodePos> = Vec::with_capacity(n_list.len());
+
+        for &i in &n_list {
+            let pos = NodePos::pos(level as u64, i);
+            if level == FIRST_LEVEL_ABOVE_TWIG {
+                let left = self
+                    .get_twig_root(2 * i)
+                    .copied()
+                    .unwrap_or(twig::NULL_TWIG.twig_root);
+                let right = self
+                    .get_twig_root(2 * i + 1)
+                    .copied()
+                    .unwrap_or(twig::NULL_TWIG.twig_root);
+                jobs.push(NodeHashJob {
+                    level: level as u8 - 1,
+                    left,
+                    right,
+                });
+            } else {
+                let child_nodes = self.nodes.get((level - 1) as usize).unwrap();
+                let node_pos_l = NodePos::pos((level - 1) as u64, 2 * i);
+                let node_pos_r = NodePos::pos((level - 1) as u64, 2 * i + 1);
+                let sl = node_pos_l.nth() as usize % NODE_SHARD_COUNT;
+                let sr = node_pos_r.nth() as usize % NODE_SHARD_COUNT;
+                let left = *child_nodes[sl].get(&node_pos_l).unwrap();
+                let right = *child_nodes[sr].get(&node_pos_r).unwrap();
+                jobs.push(NodeHashJob {
+                    level: level as u8 - 1,
+                    left,
+                    right,
+                });
+            }
+            job_positions.push(pos);
+        }
+
+        // GPU batch hash
+        if !jobs.is_empty() {
+            let results = gpu.batch_node_hash(&jobs);
+            for (idx, pos) in job_positions.iter().enumerate() {
+                self.set_node(*pos, results[idx]);
+            }
+        }
+
+        // Build next level's n_list
+        let mut new_list = Vec::with_capacity(n_list.len());
+        for &i in &n_list {
+            if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                new_list.push(i / 2);
+            }
+        }
+        new_list
+    }
+
+    /// GPU-accelerated sync_upper_nodes.
+    #[cfg(feature = "cuda")]
+    pub fn sync_upper_nodes_gpu(
+        &mut self,
+        gpu: &crate::gpu::GpuHasher,
+        mut n_list: Vec<u64>,
+        youngest_twig_id: u64,
+    ) -> (Vec<u64>, [u8; 32]) {
+        let max_level = calc_max_level(youngest_twig_id);
+        if !n_list.is_empty() {
+            for level in FIRST_LEVEL_ABOVE_TWIG..=max_level {
+                n_list = self.sync_nodes_by_level_gpu(gpu, level, n_list, youngest_twig_id);
+            }
+        }
+        let root = *self.get_node(NodePos::pos(max_level as u64, 0)).unwrap();
+        (n_list, root)
+    }
+
+    /// GPU-accelerated evict_twigs.
+    #[cfg(feature = "cuda")]
+    pub fn evict_twigs_gpu(
+        &mut self,
+        gpu: &crate::gpu::GpuHasher,
+        n_list: Vec<u64>,
+        twig_evict_start: u64,
+        twig_evict_end: u64,
+    ) -> Vec<u64> {
+        let new_list = self.sync_mt_for_active_bits_phase2_gpu(gpu, n_list);
+        for twig_id in twig_evict_start..twig_evict_end {
+            let pos = NodePos::pos(TWIG_ROOT_LEVEL as u64, twig_id);
+            let twig_root = self.get_twig(twig_id).unwrap().twig_root;
+            self.set_node_copy(pos, &twig_root);
+            let (shard_idx, key) = get_shard_idx_and_key(twig_id);
+            self.active_twig_shards[shard_idx].remove(&key);
+        }
+        new_list
+    }
+
+    /// GPU-accelerated active bits phase2 sync.
+    /// Batches sync_l2, sync_l3, and sync_top across all touched twigs.
+    #[cfg(feature = "cuda")]
+    pub fn sync_mt_for_active_bits_phase2_gpu(
+        &mut self,
+        gpu: &crate::gpu::GpuHasher,
+        n_list: Vec<u64>,
+    ) -> Vec<u64> {
+        use crate::gpu::NodeHashJob;
+
+        // Phase 2a: sync_l2 — batch all l2 jobs
+        {
+            let mut jobs = Vec::with_capacity(n_list.len());
+            let mut targets: Vec<(u64, i32)> = Vec::with_capacity(n_list.len());
+
+            for &i in &n_list {
+                let twig_id = i >> 1;
+                let pos = (i & 1) as i32;
+                let (s, k) = get_shard_idx_and_key(twig_id);
+                let twig = self.active_twig_shards[s].get(&k).unwrap();
+                let (l_idx, r_idx) = match pos {
+                    0 => (0usize, 1usize),
+                    1 => (2, 3),
+                    _ => unreachable!(),
+                };
+                jobs.push(NodeHashJob {
+                    level: 9,
+                    left: twig.active_bits_mtl1[l_idx],
+                    right: twig.active_bits_mtl1[r_idx],
+                });
+                targets.push((twig_id, pos));
+            }
+
+            if !jobs.is_empty() {
+                let results = gpu.batch_node_hash(&jobs);
+                for (idx, (twig_id, pos)) in targets.iter().enumerate() {
+                    let (s, k) = get_shard_idx_and_key(*twig_id);
+                    let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
+                    twig.active_bits_mtl2[*pos as usize] = results[idx];
+                }
+            }
+        }
+
+        // Build n_list for sync_l3 level
+        let mut l3_list = Vec::with_capacity(n_list.len());
+        for &i in &n_list {
+            let twig_id = i / 2;
+            if l3_list.is_empty() || *l3_list.last().unwrap() != twig_id {
+                l3_list.push(twig_id);
+            }
+        }
+
+        // Phase 2b: sync_l3 + sync_top — batch all jobs
+        {
+            // sync_l3 jobs (level 10)
+            let mut l3_jobs = Vec::with_capacity(l3_list.len());
+            for &twig_id in &l3_list {
+                let (s, k) = get_shard_idx_and_key(twig_id);
+                let twig = self.active_twig_shards[s].get(&k).unwrap();
+                l3_jobs.push(NodeHashJob {
+                    level: 10,
+                    left: twig.active_bits_mtl2[0],
+                    right: twig.active_bits_mtl2[1],
+                });
+            }
+
+            if !l3_jobs.is_empty() {
+                let l3_results = gpu.batch_node_hash(&l3_jobs);
+                for (idx, &twig_id) in l3_list.iter().enumerate() {
+                    let (s, k) = get_shard_idx_and_key(twig_id);
+                    let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
+                    twig.active_bits_mtl3 = l3_results[idx];
+                }
+            }
+
+            // sync_top jobs (level 11)
+            let mut top_jobs = Vec::with_capacity(l3_list.len());
+            for &twig_id in &l3_list {
+                let (s, k) = get_shard_idx_and_key(twig_id);
+                let twig = self.active_twig_shards[s].get(&k).unwrap();
+                top_jobs.push(NodeHashJob {
+                    level: 11,
+                    left: twig.left_root,
+                    right: twig.active_bits_mtl3,
+                });
+            }
+
+            if !top_jobs.is_empty() {
+                let top_results = gpu.batch_node_hash(&top_jobs);
+                for (idx, &twig_id) in l3_list.iter().enumerate() {
+                    let (s, k) = get_shard_idx_and_key(twig_id);
+                    let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
+                    twig.twig_root = top_results[idx];
+                }
+            }
+        }
+
+        // Return next-level n_list
+        let mut new_list = Vec::with_capacity(l3_list.len());
+        for &i in &l3_list {
+            if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                new_list.push(i / 2);
+            }
+        }
+        new_list
+    }
 }
 
 fn do_sync_job(
@@ -941,6 +1159,126 @@ impl Tree {
             .upper_tree
             .get_node(NodePos::pos(level as u64, nth))
             .unwrap_or(&NULL_NODE_IN_HIGHER_TREE[level as usize])
+    }
+
+    /// GPU-accelerated flush_files. Same as flush_files but uses GPU batch hashing.
+    #[cfg(feature = "cuda")]
+    pub fn flush_files_gpu(
+        &mut self,
+        gpu: &crate::gpu::GpuHasher,
+        twig_delete_start: u64,
+        twig_delete_end: u64,
+    ) -> Vec<u64> {
+        let mut entry_file_tmp = self.entry_file_wr.temp_clone();
+        let mut twig_file_tmp = self.twig_file_wr.temp_clone();
+        mem::swap(&mut entry_file_tmp, &mut self.entry_file_wr);
+        mem::swap(&mut twig_file_tmp, &mut self.twig_file_wr);
+        let n_list = thread::scope(|s| {
+            s.spawn(|| {
+                entry_file_tmp.flush().unwrap();
+            });
+            s.spawn(|| {
+                twig_file_tmp.flush();
+            });
+            self.sync_mt_for_youngest_twig_gpu(gpu);
+            let youngest_twig = self.new_twig_map.get(&self.youngest_twig_id).unwrap();
+            let mut twig_map = HashMap::new();
+            twig_map.insert(self.youngest_twig_id, youngest_twig.clone());
+            mem::swap(&mut self.new_twig_map, &mut twig_map);
+            self.upper_tree.add_twigs(twig_map);
+
+            let n_list = self.sync_mt_for_active_bits_phase1_gpu(gpu);
+            for twig_id in twig_delete_start..twig_delete_end {
+                let (shard_idx, key) = get_shard_idx_and_key(twig_id);
+                self.active_bit_shards[shard_idx].remove(&key);
+            }
+            self.touched_pos_of_512b.clear();
+            n_list
+        });
+        mem::swap(&mut entry_file_tmp, &mut self.entry_file_wr);
+        mem::swap(&mut twig_file_tmp, &mut self.twig_file_wr);
+        n_list
+    }
+
+    /// GPU-accelerated sync for youngest twig Merkle tree.
+    #[cfg(feature = "cuda")]
+    pub fn sync_mt_for_youngest_twig_gpu(&mut self, gpu: &crate::gpu::GpuHasher) {
+        if self.mtree_for_yt_change_start == -1 {
+            return;
+        }
+        let start = self.mtree_for_yt_change_start;
+        let end = self.mtree_for_yt_change_end;
+        twig::sync_mtrees_gpu(
+            gpu,
+            &mut [(&mut self.mtree_for_youngest_twig, start, end)],
+        );
+        self.mtree_for_yt_change_start = -1;
+        self.mtree_for_yt_change_end = 0;
+        let youngest_twig = self.new_twig_map.get_mut(&self.youngest_twig_id).unwrap();
+        youngest_twig
+            .left_root
+            .copy_from_slice(&self.mtree_for_youngest_twig[1]);
+    }
+
+    /// GPU-accelerated active bits phase1 sync.
+    /// Batches all sync_l1 operations into a single GPU dispatch.
+    #[cfg(feature = "cuda")]
+    pub fn sync_mt_for_active_bits_phase1_gpu(
+        &mut self,
+        gpu: &crate::gpu::GpuHasher,
+    ) -> Vec<u64> {
+        use crate::gpu::NodeHashJob;
+
+        let mut n_list = self
+            .touched_pos_of_512b
+            .iter()
+            .cloned()
+            .collect::<Vec<u64>>();
+        n_list.sort();
+
+        // Collect all sync_l1 jobs
+        let mut jobs = Vec::with_capacity(n_list.len());
+        let mut targets: Vec<(u64, i32)> = Vec::with_capacity(n_list.len()); // (twig_id, pos)
+
+        for &i in &n_list {
+            let twig_id = i >> 2;
+            let pos = (i & 3) as i32;
+            let (s, k) = get_shard_idx_and_key(twig_id);
+            let active_bits = self.active_bit_shards[s].get(&k).unwrap();
+            let start = pos as usize * 512;
+            // sync_l1 hashes active_bits pages into mtl1
+            let left_bits = active_bits.get_bits(start / 256, 32);
+            let right_bits = active_bits.get_bits(start / 256 + 1, 32);
+            let mut left = [0u8; 32];
+            let mut right = [0u8; 32];
+            left.copy_from_slice(left_bits);
+            right.copy_from_slice(right_bits);
+            jobs.push(NodeHashJob {
+                level: 8,
+                left,
+                right,
+            });
+            targets.push((twig_id, pos));
+        }
+
+        if !jobs.is_empty() {
+            let results = gpu.batch_node_hash(&jobs);
+            for (idx, (twig_id, pos)) in targets.iter().enumerate() {
+                let (s, k) = get_shard_idx_and_key(*twig_id);
+                let twig = self.upper_tree.active_twig_shards[s]
+                    .get_mut(&k)
+                    .unwrap();
+                twig.active_bits_mtl1[*pos as usize] = results[idx];
+            }
+        }
+
+        let mut new_list = Vec::with_capacity(n_list.len());
+        for &i in &n_list {
+            if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                new_list.push(i / 2);
+            }
+        }
+        new_list
     }
 }
 

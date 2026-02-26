@@ -45,3 +45,24 @@ pub fn node_hash_inplace<T: AsRef<[u8]>>(
     hasher.update(src_b);
     target.copy_from_slice(&hasher.finalize());
 }
+
+/// Batch node hash using GPU. Hashes N jobs of (level, left, right) → N hashes.
+/// Falls back to CPU if `gpu` is None.
+#[cfg(feature = "cuda")]
+pub fn batch_node_hash_gpu(
+    gpu: &crate::gpu::GpuHasher,
+    jobs: &[crate::gpu::NodeHashJob],
+    out: &mut [[u8; 32]],
+) {
+    gpu.batch_node_hash_into(jobs, out);
+}
+
+/// Batch hash variable-length entries using GPU.
+/// Falls back to CPU if `gpu` is None.
+#[cfg(feature = "cuda")]
+pub fn batch_hash_variable_gpu(
+    gpu: &crate::gpu::GpuHasher,
+    inputs: &[&[u8]],
+) -> Vec<Hash32> {
+    gpu.batch_hash_variable(inputs)
+}
