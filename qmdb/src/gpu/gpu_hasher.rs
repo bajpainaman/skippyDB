@@ -1,4 +1,7 @@
-use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig};
+use cudarc::driver::{
+    result, CudaDevice, CudaFunction, CudaSlice, DevicePtr, DeviceRepr, LaunchAsync, LaunchConfig,
+};
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// A single node-hash job: SHA256(level || left || right) = 65 bytes input
@@ -16,23 +19,44 @@ unsafe impl DeviceRepr for NodeHashJob {}
 const BLOCK_SIZE: u32 = 256;
 const PTX_SRC: &str = include_str!("sha256_kernel.cu");
 
+/// Pre-allocated host and device buffers for GPU batch operations.
+/// Avoids per-call heap allocation and CUDA device memory allocation.
+struct GpuBuffers {
+    // Node hash: pre-allocated device buffers
+    d_node_input: CudaSlice<u8>,  // max_batch_size * 65
+    d_node_output: CudaSlice<u8>, // max_batch_size * 32
+    // Node hash: pre-allocated host buffers
+    h_node_input: Vec<u8>,  // max_batch_size * 65
+    h_node_output: Vec<u8>, // max_batch_size * 32
+    // Variable hash: pre-allocated device output + host output
+    d_var_output: CudaSlice<u8>, // max_batch_size * 32
+    h_var_output: Vec<u8>,       // max_batch_size * 32
+}
+
 /// GPU-accelerated batch SHA256 hasher for QMDB Merkle operations.
 ///
-/// Pre-allocates device memory at init for `max_batch_size` jobs.
-/// All methods are safe to call from any thread (device operations are serialized by CUDA).
+/// Uses a CUDA stream for async pipeline (upload → compute → download).
+/// Pre-allocates device and host memory at init for `max_batch_size` jobs,
+/// eliminating per-call allocation overhead.
+///
+/// All methods are safe to call from any thread (operations are serialized
+/// by the internal Mutex and CUDA stream).
 pub struct GpuHasher {
     device: Arc<CudaDevice>,
     node_hash_fn: CudaFunction,
     var_hash_fn: CudaFunction,
     max_batch_size: usize,
+    bufs: Mutex<GpuBuffers>,
 }
 
 impl GpuHasher {
     /// Create a new GpuHasher on GPU device 0.
     /// `max_batch_size`: maximum number of hashes per batch (e.g. 200_000).
-    /// Pre-compiles the CUDA kernels and validates the device.
+    /// Pre-compiles the CUDA kernels, creates a stream, and pre-allocates buffers.
     pub fn new(max_batch_size: usize) -> Result<Self, String> {
-        let device = CudaDevice::new(0).map_err(|e| format!("CUDA device init failed: {}", e))?;
+        // Use new_with_stream for async pipeline (upload → compute → download on one stream)
+        let device = CudaDevice::new_with_stream(0)
+            .map_err(|e| format!("CUDA device init failed: {}", e))?;
 
         // Compile PTX from CUDA source at runtime via NVRTC
         let ptx = cudarc::nvrtc::compile_ptx(PTX_SRC)
@@ -50,17 +74,40 @@ impl GpuHasher {
             .get_func("sha256", "sha256_variable_hash")
             .ok_or_else(|| "sha256_variable_hash function not found".to_string())?;
 
+        // Pre-allocate persistent device buffers
+        let d_node_input: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 65)
+            .map_err(|e| format!("GPU node input alloc failed: {}", e))?;
+        let d_node_output: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU node output alloc failed: {}", e))?;
+        let d_var_output: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU var output alloc failed: {}", e))?;
+
+        let bufs = Mutex::new(GpuBuffers {
+            d_node_input,
+            d_node_output,
+            h_node_input: vec![0u8; max_batch_size * 65],
+            h_node_output: vec![0u8; max_batch_size * 32],
+            d_var_output,
+            h_var_output: vec![0u8; max_batch_size * 32],
+        });
+
         Ok(Self {
             device,
             node_hash_fn,
             var_hash_fn,
             max_batch_size,
+            bufs,
         })
     }
 
     /// Batch-hash N fixed 65-byte node inputs on the GPU.
     /// Each job = SHA256(level_byte || left_32B || right_32B).
     /// Returns N x [u8; 32] hashes, byte-identical to CPU `hasher::hash2`.
+    ///
+    /// Uses pre-allocated buffers and async CUDA stream for pipelined execution.
     pub fn batch_node_hash(&self, jobs: &[NodeHashJob]) -> Vec<[u8; 32]> {
         let n = jobs.len();
         if n == 0 {
@@ -73,52 +120,61 @@ impl GpuHasher {
             self.max_batch_size
         );
 
-        // Flatten jobs to packed 65-byte layout for the kernel
-        let mut flat_input = vec![0u8; n * 65];
+        let mut bufs = self.bufs.lock();
+
+        // Flatten jobs into pre-allocated host buffer
         for (i, job) in jobs.iter().enumerate() {
             let off = i * 65;
-            flat_input[off] = job.level;
-            flat_input[off + 1..off + 33].copy_from_slice(&job.left);
-            flat_input[off + 33..off + 65].copy_from_slice(&job.right);
+            bufs.h_node_input[off] = job.level;
+            bufs.h_node_input[off + 1..off + 33].copy_from_slice(&job.left);
+            bufs.h_node_input[off + 33..off + 65].copy_from_slice(&job.right);
         }
 
-        // Upload to device
-        let d_input = self
-            .device
-            .htod_copy(flat_input)
+        // Async upload to pre-allocated device buffer (partial copy)
+        let stream = *self.device.cu_stream();
+        unsafe {
+            result::memcpy_htod_async(
+                *bufs.d_node_input.device_ptr(),
+                &bufs.h_node_input[..n * 65],
+                stream,
+            )
             .expect("GPU input upload failed");
-        let d_output: CudaSlice<u8> = self
-            .device
-            .alloc_zeros(n * 32)
-            .expect("GPU output alloc failed");
+        }
 
-        // Launch kernel
+        // Launch kernel (queued on same stream, executes after upload completes)
         let grid = ((n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
-        let block = (BLOCK_SIZE, 1, 1);
         let cfg = LaunchConfig {
             grid_dim: grid,
-            block_dim: block,
+            block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
 
         unsafe {
             self.node_hash_fn
                 .clone()
-                .launch(cfg, (&d_input, &d_output, n as u32))
+                .launch(cfg, (&bufs.d_node_input, &bufs.d_node_output, n as u32))
                 .expect("GPU kernel launch failed");
         }
 
-        // Download results
-        let flat_output = self
-            .device
-            .dtoh_sync_copy(&d_output)
+        // Async download to pre-allocated host buffer (partial copy)
+        let d_out_ptr = *bufs.d_node_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_node_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
             .expect("GPU output download failed");
+        }
+
+        // Synchronize: wait for upload → compute → download pipeline to complete
+        self.device.synchronize().expect("GPU sync failed");
 
         // Convert flat bytes to array of [u8; 32]
         let mut result = Vec::with_capacity(n);
         for i in 0..n {
             let mut hash = [0u8; 32];
-            hash.copy_from_slice(&flat_output[i * 32..(i + 1) * 32]);
+            hash.copy_from_slice(&bufs.h_node_output[i * 32..(i + 1) * 32]);
             result.push(hash);
         }
         result
@@ -139,6 +195,9 @@ impl GpuHasher {
     /// Batch-hash N variable-length inputs on the GPU.
     /// Each input can be any length (typically 50-300 bytes for entries).
     /// Returns N x [u8; 32] hashes, byte-identical to CPU `hasher::hash`.
+    ///
+    /// Variable-length inputs require per-call allocation for the data buffer
+    /// (since total size varies), but output buffers are pre-allocated.
     pub fn batch_hash_variable(&self, inputs: &[&[u8]]) -> Vec<[u8; 32]> {
         let n = inputs.len();
         if n == 0 {
@@ -163,7 +222,7 @@ impl GpuHasher {
             flat_data.extend_from_slice(input);
         }
 
-        // Upload to device
+        // Variable-length data buffer must be allocated per call (size varies)
         let d_data = self
             .device
             .htod_copy(flat_data)
@@ -176,17 +235,14 @@ impl GpuHasher {
             .device
             .htod_copy(lengths)
             .expect("GPU lengths upload failed");
-        let d_output: CudaSlice<u8> = self
-            .device
-            .alloc_zeros(n * 32)
-            .expect("GPU output alloc failed");
+
+        let mut bufs = self.bufs.lock();
 
         // Launch kernel
         let grid = ((n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
-        let block = (BLOCK_SIZE, 1, 1);
         let cfg = LaunchConfig {
             grid_dim: grid,
-            block_dim: block,
+            block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -195,21 +251,29 @@ impl GpuHasher {
                 .clone()
                 .launch(
                     cfg,
-                    (&d_data, &d_offsets, &d_lengths, &d_output, n as u32),
+                    (&d_data, &d_offsets, &d_lengths, &bufs.d_var_output, n as u32),
                 )
                 .expect("GPU variable hash kernel launch failed");
         }
 
-        // Download results
-        let flat_output = self
-            .device
-            .dtoh_sync_copy(&d_output)
+        // Download to pre-allocated host buffer
+        let stream = *self.device.cu_stream();
+        let d_out_ptr = *bufs.d_var_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_var_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
             .expect("GPU output download failed");
+        }
+
+        self.device.synchronize().expect("GPU sync failed");
 
         let mut result = Vec::with_capacity(n);
         for i in 0..n {
             let mut hash = [0u8; 32];
-            hash.copy_from_slice(&flat_output[i * 32..(i + 1) * 32]);
+            hash.copy_from_slice(&bufs.h_var_output[i * 32..(i + 1) * 32]);
             result.push(hash);
         }
         result

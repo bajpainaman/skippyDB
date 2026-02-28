@@ -133,27 +133,38 @@ impl TwigFile {
                     .unwrap();
             }
         }
-        // recover a little cone with 8 leaves into cache
-        // this little cone will be queried by 'get_proof'
-        let mut level = 0;
-        for i in start / 2..end / 2 {
-            let off = ((i - start / 2) * 64) as usize;
-            let v = hash2(level, &buf[off..off + 32], &buf[off + 32..off + 64]);
-            cache.insert(i, v);
+        // Recover a little cone with 8 leaves into cache using batch hashing.
+        // Level 0: 4 hashes from 8 leaves
+        {
+            let count = ((end - start) / 2) as usize;
+            let mut levels = Vec::with_capacity(count);
+            let mut lefts = Vec::with_capacity(count);
+            let mut rights = Vec::with_capacity(count);
+            for i in start / 2..end / 2 {
+                let off = ((i - start / 2) * 64) as usize;
+                levels.push(0u8);
+                lefts.push(<[u8; 32]>::try_from(&buf[off..off + 32]).unwrap());
+                rights.push(<[u8; 32]>::try_from(&buf[off + 32..off + 64]).unwrap());
+            }
+            let mut out = vec![[0u8; 32]; count];
+            crate::utils::hasher::batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+            for (idx, i) in (start / 2..end / 2).enumerate() {
+                cache.insert(i, out[idx]);
+            }
         }
-        level = 1;
+        // Level 1: 2 hashes from level 0 results
         for i in start / 4..end / 4 {
             let v = hash2(
-                level,
+                1,
                 cache.get(&(i * 2)).unwrap(),
                 cache.get(&(i * 2 + 1)).unwrap(),
             );
             cache.insert(i, v);
         }
-        level = 2;
+        // Level 2: 1 hash from level 1 results
         let id = start / 8;
         let v = hash2(
-            level,
+            2,
             cache.get(&(id * 2)).unwrap(),
             cache.get(&(id * 2 + 1)).unwrap(),
         );
