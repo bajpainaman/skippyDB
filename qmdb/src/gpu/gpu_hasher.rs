@@ -45,25 +45,45 @@ pub struct GpuHasher {
     device: Arc<CudaDevice>,
     node_hash_fn: CudaFunction,
     var_hash_fn: CudaFunction,
+    warp_coop_fn: CudaFunction,
     max_batch_size: usize,
     bufs: Mutex<GpuBuffers>,
 }
 
 impl GpuHasher {
+    /// Returns the number of available CUDA devices.
+    pub fn device_count() -> Result<i32, String> {
+        CudaDevice::count().map_err(|e| format!("CUDA device count failed: {}", e))
+    }
+
     /// Create a new GpuHasher on GPU device 0.
     /// `max_batch_size`: maximum number of hashes per batch (e.g. 200_000).
     /// Pre-compiles the CUDA kernels, creates a stream, and pre-allocates buffers.
     pub fn new(max_batch_size: usize) -> Result<Self, String> {
-        // Use new_with_stream for async pipeline (upload → compute → download on one stream)
-        let device = CudaDevice::new_with_stream(0)
-            .map_err(|e| format!("CUDA device init failed: {}", e))?;
+        Self::new_on_device(0, max_batch_size)
+    }
+
+    /// Create a new GpuHasher on a specific GPU device.
+    /// `ordinal`: CUDA device index (0, 1, 2, ...).
+    /// `max_batch_size`: maximum number of hashes per batch.
+    pub fn new_on_device(ordinal: usize, max_batch_size: usize) -> Result<Self, String> {
+        let device = CudaDevice::new_with_stream(ordinal)
+            .map_err(|e| format!("CUDA device {} init failed: {}", ordinal, e))?;
 
         // Compile PTX from CUDA source at runtime via NVRTC
         let ptx = cudarc::nvrtc::compile_ptx(PTX_SRC)
             .map_err(|e| format!("NVRTC compilation failed: {}", e))?;
 
         device
-            .load_ptx(ptx, "sha256", &["sha256_node_hash", "sha256_variable_hash"])
+            .load_ptx(
+                ptx,
+                "sha256",
+                &[
+                    "sha256_node_hash",
+                    "sha256_variable_hash",
+                    "sha256_node_hash_warp_coop",
+                ],
+            )
             .map_err(|e| format!("PTX load failed: {}", e))?;
 
         let node_hash_fn = device
@@ -73,6 +93,10 @@ impl GpuHasher {
         let var_hash_fn = device
             .get_func("sha256", "sha256_variable_hash")
             .ok_or_else(|| "sha256_variable_hash function not found".to_string())?;
+
+        let warp_coop_fn = device
+            .get_func("sha256", "sha256_node_hash_warp_coop")
+            .ok_or_else(|| "sha256_node_hash_warp_coop function not found".to_string())?;
 
         // Pre-allocate persistent device buffers
         let d_node_input: CudaSlice<u8> = device
@@ -98,6 +122,7 @@ impl GpuHasher {
             device,
             node_hash_fn,
             var_hash_fn,
+            warp_coop_fn,
             max_batch_size,
             bufs,
         })
@@ -192,6 +217,79 @@ impl GpuHasher {
         out.copy_from_slice(&hashes);
     }
 
+    /// Batch-hash using the warp-cooperative kernel (8 threads per hash).
+    /// Functionally identical to `batch_node_hash` but uses warp shuffles
+    /// for inter-thread state rotation, potentially improving throughput
+    /// on GPUs with high SM counts.
+    pub fn batch_node_hash_warp_coop(&self, jobs: &[NodeHashJob]) -> Vec<[u8; 32]> {
+        let n = jobs.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        assert!(
+            n <= self.max_batch_size,
+            "batch size {} exceeds max {}",
+            n,
+            self.max_batch_size
+        );
+
+        let mut bufs = self.bufs.lock();
+
+        // Flatten jobs into pre-allocated host buffer
+        for (i, job) in jobs.iter().enumerate() {
+            let off = i * 65;
+            bufs.h_node_input[off] = job.level;
+            bufs.h_node_input[off + 1..off + 33].copy_from_slice(&job.left);
+            bufs.h_node_input[off + 33..off + 65].copy_from_slice(&job.right);
+        }
+
+        let stream = *self.device.cu_stream();
+        unsafe {
+            result::memcpy_htod_async(
+                *bufs.d_node_input.device_ptr(),
+                &bufs.h_node_input[..n * 65],
+                stream,
+            )
+            .expect("GPU input upload failed");
+        }
+
+        // 8 threads per job
+        let total_threads = n as u32 * 8;
+        let grid = ((total_threads + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
+        let cfg = LaunchConfig {
+            grid_dim: grid,
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.warp_coop_fn
+                .clone()
+                .launch(cfg, (&bufs.d_node_input, &bufs.d_node_output, n as u32))
+                .expect("GPU warp-coop kernel launch failed");
+        }
+
+        let d_out_ptr = *bufs.d_node_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_node_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
+            .expect("GPU output download failed");
+        }
+
+        self.device.synchronize().expect("GPU sync failed");
+
+        let mut result = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bufs.h_node_output[i * 32..(i + 1) * 32]);
+            result.push(hash);
+        }
+        result
+    }
+
     /// Batch-hash N variable-length inputs on the GPU.
     /// Each input can be any length (typically 50-300 bytes for entries).
     /// Returns N x [u8; 32] hashes, byte-identical to CPU `hasher::hash`.
@@ -277,6 +375,54 @@ impl GpuHasher {
             result.push(hash);
         }
         result
+    }
+}
+
+/// Multi-GPU hasher that distributes work across all available CUDA devices.
+/// Uses round-robin assignment: shard N goes to GPU (N % num_gpus).
+/// Falls back to single-GPU if only one device is available.
+pub struct MultiGpuHasher {
+    hashers: Vec<GpuHasher>,
+}
+
+impl MultiGpuHasher {
+    /// Initialize a MultiGpuHasher across all available CUDA devices.
+    /// Each GPU gets its own pre-allocated buffers and CUDA stream.
+    pub fn new(max_batch_size: usize) -> Result<Self, String> {
+        let count = GpuHasher::device_count()?;
+        if count <= 0 {
+            return Err("No CUDA devices available".to_string());
+        }
+        let mut hashers = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            hashers.push(GpuHasher::new_on_device(i, max_batch_size)?);
+        }
+        Ok(Self { hashers })
+    }
+
+    /// Number of GPUs being used.
+    pub fn gpu_count(&self) -> usize {
+        self.hashers.len()
+    }
+
+    /// Get the GpuHasher for a given shard (round-robin assignment).
+    pub fn for_shard(&self, shard_id: usize) -> &GpuHasher {
+        &self.hashers[shard_id % self.hashers.len()]
+    }
+
+    /// Get the GpuHasher for GPU device index directly.
+    pub fn device(&self, ordinal: usize) -> &GpuHasher {
+        &self.hashers[ordinal]
+    }
+
+    /// Batch-hash on a specific GPU (selected by shard_id).
+    pub fn batch_node_hash(&self, shard_id: usize, jobs: &[NodeHashJob]) -> Vec<[u8; 32]> {
+        self.for_shard(shard_id).batch_node_hash(jobs)
+    }
+
+    /// Batch-hash variable-length inputs on a specific GPU (selected by shard_id).
+    pub fn batch_hash_variable(&self, shard_id: usize, inputs: &[&[u8]]) -> Vec<[u8; 32]> {
+        self.for_shard(shard_id).batch_hash_variable(inputs)
     }
 }
 

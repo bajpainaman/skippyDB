@@ -182,7 +182,7 @@ impl EntryBuffer {
         sn_end: u64,
         curr_buf: Box<BigBuf>,
     ) {
-        let end = self.end.load(Ordering::SeqCst);
+        let end = self.end.load(Ordering::Acquire);
         self.buf_map.insert(end / BIG_BUF_SIZE_I64, curr_buf);
         self.pos_sender.send(end).unwrap();
         self.pos_sender.send(i64::MIN).unwrap();
@@ -205,13 +205,13 @@ impl EntryBuffer {
         if size > BIG_BUF_SIZE {
             panic!("Entry too large {} vs {}", size, BIG_BUF_SIZE);
         }
-        let file_pos = self.end.load(Ordering::SeqCst);
+        let file_pos = self.end.load(Ordering::Acquire);
         let idx = file_pos / BIG_BUF_SIZE_I64;
         let offset = file_pos % BIG_BUF_SIZE_I64;
         if offset + (size as i64) < BIG_BUF_SIZE_I64 {
             // curr_buf is large enough
             entry.dump(&mut curr_buf[offset as usize..], deactived_serial_num_list);
-            self.end.fetch_add(size as i64, Ordering::SeqCst);
+            self.end.fetch_add(size as i64, Ordering::Release);
             return (file_pos, curr_buf);
         }
         let mut new_buf = self.allocate_big_buf();
@@ -220,7 +220,7 @@ impl EntryBuffer {
         curr_buf[offset as usize..].copy_from_slice(&new_buf[..copied_length]);
         new_buf.copy_within(copied_length..total_length, 0);
         self.buf_map.insert(idx, curr_buf);
-        self.end.fetch_add(size as i64, Ordering::SeqCst);
+        self.end.fetch_add(size as i64, Ordering::Release);
         self.pos_sender.send(file_pos).unwrap();
         (file_pos, new_buf)
     }
@@ -229,9 +229,9 @@ impl EntryBuffer {
         let res = self.buf_map.get(&idx).unwrap().clone();
         if remove_idx >= 0 {
             let new_start = (remove_idx + 1) * BIG_BUF_SIZE as i64;
-            let old_start = self.start.load(Ordering::SeqCst);
+            let old_start = self.start.load(Ordering::Acquire);
             if old_start < new_start {
-                self.start.store(new_start, Ordering::SeqCst);
+                self.start.store(new_start, Ordering::Release);
             }
             if let Some((_, buf)) = self.buf_map.remove(&remove_idx) {
                 self.free_list.push(buf);
@@ -258,8 +258,8 @@ impl EntryBuffer {
         F: FnMut(EntryBz),
     {
         let (idx, offset) = (file_pos / BIG_BUF_SIZE_I64, file_pos % BIG_BUF_SIZE_I64);
-        let start = self.start.load(Ordering::SeqCst);
-        let end = self.end.load(Ordering::SeqCst);
+        let start = self.start.load(Ordering::Acquire);
+        let end = self.end.load(Ordering::Acquire);
         if file_pos < start {
             return (true /*inDisk*/, false /*HaveAccessed*/, curr_buf);
         }
@@ -288,7 +288,7 @@ impl EntryBuffer {
         let target = self.buf_map.get(&idx);
         if target.is_none() {
             // check if start has just been changed
-            let start = self.start.load(Ordering::SeqCst);
+            let start = self.start.load(Ordering::Acquire);
             if file_pos < start {
                 return (true /*inDisk*/, false /*HaveAccessed*/, curr_buf);
             }

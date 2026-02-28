@@ -236,3 +236,120 @@ extern "C" __global__ void sha256_variable_hash(
         store_be32(&output[i * 4], state[i]);
     }
 }
+
+// ============================================================
+// Kernel 3: Warp-cooperative fixed 65-byte node hash
+//
+// 8 threads cooperate on one SHA256 hash. Each thread "owns" one
+// of the 8 state words (a-h). Warp shuffles rotate state between
+// lanes without shared memory, improving occupancy.
+//
+// Launch with: blockDim.x must be a multiple of 8.
+// Each group of 8 consecutive threads processes one hash job.
+// Grid: (ceil(count * 8 / blockDim.x), 1, 1)
+// ============================================================
+extern "C" __global__ void sha256_node_hash_warp_coop(
+    const uint8_t* __restrict__ jobs,
+    uint8_t* __restrict__ out,
+    uint32_t count
+) {
+    uint32_t global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t job_idx = global_tid / 8;
+    uint32_t lane = global_tid % 8; // 0=a, 1=b, ..., 7=h
+
+    if (job_idx >= count) return;
+
+    const uint8_t* input = jobs + job_idx * 65;
+    uint8_t* output = out + job_idx * 32;
+
+    // Mask for our 8-thread team within the warp
+    uint32_t team_base = (threadIdx.x / 8) * 8;
+    uint32_t team_mask = 0xFFu << (team_base % 32);
+
+    // Each thread holds one state word
+    uint32_t my_state = H_INIT[lane];
+
+    // --- Block 1: first 64 bytes ---
+    uint32_t W[64];
+    for (int i = 0; i < 16; i++) {
+        W[i] = load_be32(&input[i * 4]);
+    }
+    for (int i = 16; i < 64; i++) {
+        W[i] = gamma1(W[i-2]) + W[i-7] + gamma0(W[i-15]) + W[i-16];
+    }
+
+    for (int i = 0; i < 64; i++) {
+        uint32_t val_a = __shfl_sync(team_mask, my_state, team_base + 0);
+        uint32_t val_b = __shfl_sync(team_mask, my_state, team_base + 1);
+        uint32_t val_c = __shfl_sync(team_mask, my_state, team_base + 2);
+        uint32_t val_d = __shfl_sync(team_mask, my_state, team_base + 3);
+        uint32_t val_e = __shfl_sync(team_mask, my_state, team_base + 4);
+        uint32_t val_f = __shfl_sync(team_mask, my_state, team_base + 5);
+        uint32_t val_g = __shfl_sync(team_mask, my_state, team_base + 6);
+        uint32_t val_h = __shfl_sync(team_mask, my_state, team_base + 7);
+
+        uint32_t T1 = val_h + sigma1(val_e) + ch(val_e, val_f, val_g) + K[i] + W[i];
+        uint32_t T2 = sigma0(val_a) + maj(val_a, val_b, val_c);
+
+        switch (lane) {
+            case 0: my_state = T1 + T2; break;
+            case 1: my_state = val_a; break;
+            case 2: my_state = val_b; break;
+            case 3: my_state = val_c; break;
+            case 4: my_state = val_d + T1; break;
+            case 5: my_state = val_e; break;
+            case 6: my_state = val_f; break;
+            case 7: my_state = val_g; break;
+        }
+    }
+
+    my_state += H_INIT[lane];
+
+    // --- Block 2: byte 64 + padding + length ---
+    uint8_t block2[64];
+    block2[0] = input[64];
+    block2[1] = 0x80;
+    #pragma unroll
+    for (int i = 2; i < 56; i++) block2[i] = 0;
+    block2[56] = 0; block2[57] = 0; block2[58] = 0; block2[59] = 0;
+    block2[60] = 0; block2[61] = 0; block2[62] = 0x02; block2[63] = 0x08;
+
+    for (int i = 0; i < 16; i++) {
+        W[i] = load_be32(&block2[i * 4]);
+    }
+    for (int i = 16; i < 64; i++) {
+        W[i] = gamma1(W[i-2]) + W[i-7] + gamma0(W[i-15]) + W[i-16];
+    }
+
+    uint32_t pre_state = my_state;
+
+    for (int i = 0; i < 64; i++) {
+        uint32_t val_a = __shfl_sync(team_mask, my_state, team_base + 0);
+        uint32_t val_b = __shfl_sync(team_mask, my_state, team_base + 1);
+        uint32_t val_c = __shfl_sync(team_mask, my_state, team_base + 2);
+        uint32_t val_d = __shfl_sync(team_mask, my_state, team_base + 3);
+        uint32_t val_e = __shfl_sync(team_mask, my_state, team_base + 4);
+        uint32_t val_f = __shfl_sync(team_mask, my_state, team_base + 5);
+        uint32_t val_g = __shfl_sync(team_mask, my_state, team_base + 6);
+        uint32_t val_h = __shfl_sync(team_mask, my_state, team_base + 7);
+
+        uint32_t T1 = val_h + sigma1(val_e) + ch(val_e, val_f, val_g) + K[i] + W[i];
+        uint32_t T2 = sigma0(val_a) + maj(val_a, val_b, val_c);
+
+        switch (lane) {
+            case 0: my_state = T1 + T2; break;
+            case 1: my_state = val_a; break;
+            case 2: my_state = val_b; break;
+            case 3: my_state = val_c; break;
+            case 4: my_state = val_d + T1; break;
+            case 5: my_state = val_e; break;
+            case 6: my_state = val_f; break;
+            case 7: my_state = val_g; break;
+        }
+    }
+
+    my_state += pre_state;
+
+    // Each thread writes its 4-byte state word
+    store_be32(&output[lane * 4], my_state);
+}

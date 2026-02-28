@@ -3,6 +3,7 @@ pub mod bytescache;
 pub mod changeset;
 pub mod codec;
 pub mod hasher;
+pub mod numa;
 pub mod ringchannel;
 pub mod shortlist;
 pub mod slice;

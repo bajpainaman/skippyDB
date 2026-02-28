@@ -4,4 +4,4 @@ mod gpu_tests;
 #[cfg(test)]
 mod integration_tests;
 
-pub use gpu_hasher::{GpuHasher, NodeHashJob};
+pub use gpu_hasher::{GpuHasher, MultiGpuHasher, NodeHashJob};
