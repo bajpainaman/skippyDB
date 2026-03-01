@@ -3440,4 +3440,440 @@ mod tests {
 
     use crate::merkletree::check::check_hash_consistency;
     use crate::merkletree::helpers::build_test_tree;
+
+    // ========================================================================
+    // SoA (Structure-of-Arrays) Layout Tests
+    // ========================================================================
+
+    #[test]
+    fn test_soa_basic_matches_aos() {
+        let gpu = gpu_or_skip!();
+        let mut jobs = Vec::new();
+        let mut levels = Vec::new();
+        let mut lefts = Vec::new();
+        let mut rights = Vec::new();
+
+        for level in 0u8..12 {
+            let left = [level.wrapping_mul(7).wrapping_add(0x11); 32];
+            let right = [level.wrapping_mul(13).wrapping_add(0xAB); 32];
+            jobs.push(NodeHashJob { level, left, right });
+            levels.push(level);
+            lefts.push(left);
+            rights.push(right);
+        }
+
+        let aos_results = gpu.batch_node_hash(&jobs);
+        let soa_results = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+
+        assert_eq!(aos_results.len(), soa_results.len());
+        for (i, (aos, soa)) in aos_results.iter().zip(soa_results.iter()).enumerate() {
+            assert_eq!(
+                aos, soa,
+                "SoA/AoS mismatch at {}: AoS={} SoA={}",
+                i,
+                hex::encode(aos),
+                hex::encode(soa)
+            );
+        }
+    }
+
+    #[test]
+    fn test_soa_matches_cpu() {
+        let gpu = gpu_or_skip!();
+        let n = 100;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+        let mut expected = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let level = (i % 64) as u8;
+            let left = [(i as u8).wrapping_mul(3); 32];
+            let right = [(i as u8).wrapping_mul(7); 32];
+            levels.push(level);
+            lefts.push(left);
+            rights.push(right);
+            expected.push(cpu_hash2(level, &left, &right));
+        }
+
+        let soa_results = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+
+        for (i, (gpu_hash, cpu_hash)) in soa_results.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                gpu_hash, cpu_hash,
+                "SoA/CPU mismatch at {}: SoA={} CPU={}",
+                i,
+                hex::encode(gpu_hash),
+                hex::encode(cpu_hash)
+            );
+        }
+    }
+
+    #[test]
+    fn test_soa_large_batch_10000() {
+        let gpu = gpu_or_skip!(100_000);
+        let n = 10000;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+        let mut jobs = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let level = (i % 12) as u8;
+            let mut left = [0u8; 32];
+            let mut right = [0u8; 32];
+            for j in 0..32 {
+                left[j] = ((i * 7 + j * 13) & 0xFF) as u8;
+                right[j] = ((i * 11 + j * 17) & 0xFF) as u8;
+            }
+            levels.push(level);
+            lefts.push(left);
+            rights.push(right);
+            jobs.push(NodeHashJob { level, left, right });
+        }
+
+        let aos_results = gpu.batch_node_hash(&jobs);
+        let soa_results = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+
+        assert_eq!(aos_results.len(), soa_results.len());
+        for (i, (aos, soa)) in aos_results.iter().zip(soa_results.iter()).enumerate() {
+            assert_eq!(
+                aos, soa,
+                "SoA/AoS mismatch at large batch job {}: AoS={} SoA={}",
+                i,
+                hex::encode(aos),
+                hex::encode(soa)
+            );
+        }
+    }
+
+    #[test]
+    fn test_soa_empty_batch() {
+        let gpu = gpu_or_skip!();
+        let result = gpu.batch_node_hash_soa(&[], &[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_soa_single_job() {
+        let gpu = gpu_or_skip!();
+        let level = 5u8;
+        let left = [0xAA; 32];
+        let right = [0xBB; 32];
+
+        let expected = cpu_hash2(level, &left, &right);
+        let result = gpu.batch_node_hash_soa(&[level], &[left], &[right]);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0], expected,
+            "Single SoA job mismatch: got={} expected={}",
+            hex::encode(result[0]),
+            hex::encode(expected)
+        );
+    }
+
+    #[test]
+    fn test_soa_all_zeros() {
+        let gpu = gpu_or_skip!();
+        let expected = cpu_hash2(0, &[0; 32], &[0; 32]);
+        let result = gpu.batch_node_hash_soa(&[0], &[[0; 32]], &[[0; 32]]);
+        assert_eq!(result[0], expected);
+    }
+
+    #[test]
+    fn test_soa_all_ones() {
+        let gpu = gpu_or_skip!();
+        let expected = cpu_hash2(255, &[0xFF; 32], &[0xFF; 32]);
+        let result = gpu.batch_node_hash_soa(&[255], &[[0xFF; 32]], &[[0xFF; 32]]);
+        assert_eq!(result[0], expected);
+    }
+
+    #[test]
+    fn test_soa_all_levels_0_to_63() {
+        let gpu = gpu_or_skip!();
+        let n = 64;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+
+        for i in 0..n {
+            levels.push(i as u8);
+            lefts.push([(i as u8).wrapping_mul(3); 32]);
+            rights.push([(i as u8).wrapping_mul(7); 32]);
+        }
+
+        let soa_results = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        for i in 0..n {
+            let expected = cpu_hash2(levels[i], &lefts[i], &rights[i]);
+            assert_eq!(soa_results[i], expected, "Level {} mismatch", i);
+        }
+    }
+
+    #[test]
+    fn test_soa_into_matches_soa() {
+        let gpu = gpu_or_skip!();
+        let n = 50;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+
+        for i in 0..n {
+            levels.push((i % 12) as u8);
+            lefts.push([(i as u8).wrapping_mul(5); 32]);
+            rights.push([(i as u8).wrapping_mul(11); 32]);
+        }
+
+        let soa_results = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        let mut into_results = vec![[0u8; 32]; n];
+        gpu.batch_node_hash_soa_into(&levels, &lefts, &rights, &mut into_results);
+
+        assert_eq!(soa_results, into_results);
+    }
+
+    #[test]
+    fn test_soa_deterministic() {
+        let gpu = gpu_or_skip!();
+        let levels = vec![3u8; 100];
+        let lefts = vec![[0x42; 32]; 100];
+        let rights = vec![[0x84; 32]; 100];
+
+        let r1 = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        let r2 = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        assert_eq!(r1, r2, "SoA results should be deterministic");
+    }
+
+    #[test]
+    fn test_soa_level_affects_output() {
+        let gpu = gpu_or_skip!();
+        let left = [0x11; 32];
+        let right = [0x22; 32];
+
+        let r0 = gpu.batch_node_hash_soa(&[0], &[left], &[right]);
+        let r1 = gpu.batch_node_hash_soa(&[1], &[left], &[right]);
+
+        assert_ne!(
+            r0[0], r1[0],
+            "Different levels with same left/right should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_soa_left_right_swap_differs() {
+        let gpu = gpu_or_skip!();
+        let a = [0xAA; 32];
+        let b = [0xBB; 32];
+
+        let r1 = gpu.batch_node_hash_soa(&[5], &[a], &[b]);
+        let r2 = gpu.batch_node_hash_soa(&[5], &[b], &[a]);
+
+        assert_ne!(
+            r1[0], r2[0],
+            "Swapping left/right should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_soa_batch_256_boundary() {
+        let gpu = gpu_or_skip!();
+        // Exactly one CUDA block (256 threads)
+        let n = 256;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+        let mut jobs = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let level = (i % 64) as u8;
+            let left = [(i & 0xFF) as u8; 32];
+            let right = [((i * 3) & 0xFF) as u8; 32];
+            levels.push(level);
+            lefts.push(left);
+            rights.push(right);
+            jobs.push(NodeHashJob { level, left, right });
+        }
+
+        let aos = gpu.batch_node_hash(&jobs);
+        let soa = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        assert_eq!(aos, soa);
+    }
+
+    #[test]
+    fn test_soa_batch_257_boundary() {
+        let gpu = gpu_or_skip!();
+        // One full block + 1 thread (tests grid boundary)
+        let n = 257;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+        let mut jobs = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let level = (i % 64) as u8;
+            let left = [(i & 0xFF) as u8; 32];
+            let right = [((i * 3) & 0xFF) as u8; 32];
+            levels.push(level);
+            lefts.push(left);
+            rights.push(right);
+            jobs.push(NodeHashJob { level, left, right });
+        }
+
+        let aos = gpu.batch_node_hash(&jobs);
+        let soa = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        assert_eq!(aos, soa);
+    }
+
+    #[test]
+    fn test_soa_sequential_bytes() {
+        let gpu = gpu_or_skip!();
+        let n = 100;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+
+        for i in 0..n {
+            levels.push(i as u8);
+            let mut left = [0u8; 32];
+            let mut right = [0u8; 32];
+            for j in 0..32 {
+                left[j] = (i + j) as u8;
+                right[j] = (i * 2 + j) as u8;
+            }
+            lefts.push(left);
+            rights.push(right);
+        }
+
+        let soa = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        for i in 0..n {
+            let expected = cpu_hash2(levels[i], &lefts[i], &rights[i]);
+            assert_eq!(soa[i], expected, "Sequential bytes mismatch at {}", i);
+        }
+    }
+
+    #[test]
+    fn test_soa_collision_resistance() {
+        let gpu = gpu_or_skip!();
+        let n = 1000;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+
+        for i in 0..n {
+            levels.push((i % 256) as u8);
+            let seed = i as u64;
+            lefts.push(pseudo_random_hash(seed * 2));
+            rights.push(pseudo_random_hash(seed * 2 + 1));
+        }
+
+        let results = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+        let unique: HashSet<[u8; 32]> = results.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            n,
+            "Expected {} unique hashes, got {}",
+            n,
+            unique.len()
+        );
+    }
+
+    #[test]
+    fn test_soa_repeated_calls_same_data() {
+        let gpu = gpu_or_skip!();
+        let levels = vec![7u8; 50];
+        let lefts = vec![[0x33; 32]; 50];
+        let rights = vec![[0x66; 32]; 50];
+
+        for _ in 0..10 {
+            let result = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+            let expected = cpu_hash2(7, &[0x33; 32], &[0x66; 32]);
+            for hash in &result {
+                assert_eq!(hash, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_soa_multi_gpu_hasher() {
+        let mgpu = match crate::gpu::MultiGpuHasher::new(10000) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("Skipping multi-GPU test: {}", e);
+                return;
+            }
+        };
+
+        let levels = vec![0u8, 1, 2, 3, 4];
+        let lefts: Vec<[u8; 32]> = (0..5).map(|i| [i as u8; 32]).collect();
+        let rights: Vec<[u8; 32]> = (0..5).map(|i| [(i * 3) as u8; 32]).collect();
+
+        let result = mgpu.batch_node_hash_soa(0, &levels, &lefts, &rights);
+        assert_eq!(result.len(), 5);
+
+        for i in 0..5 {
+            let expected = cpu_hash2(levels[i], &lefts[i], &rights[i]);
+            assert_eq!(result[i], expected);
+        }
+    }
+
+    #[test]
+    fn test_soa_stress_100k() {
+        let gpu = gpu_or_skip!(200_000);
+        let n = 100_000;
+        let mut levels = Vec::with_capacity(n);
+        let mut lefts = Vec::with_capacity(n);
+        let mut rights = Vec::with_capacity(n);
+        let mut jobs = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let level = (i % 64) as u8;
+            let left = pseudo_random_hash(i as u64);
+            let right = pseudo_random_hash(i as u64 + n as u64);
+            levels.push(level);
+            lefts.push(left);
+            rights.push(right);
+            jobs.push(NodeHashJob { level, left, right });
+        }
+
+        let aos = gpu.batch_node_hash(&jobs);
+        let soa = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+
+        for i in 0..n {
+            assert_eq!(
+                aos[i], soa[i],
+                "Stress 100k: mismatch at {}: AoS={} SoA={}",
+                i,
+                hex::encode(aos[i]),
+                hex::encode(soa[i])
+            );
+        }
+    }
+
+    #[test]
+    fn test_soa_avalanche_single_bit() {
+        let gpu = gpu_or_skip!();
+        let level = 3u8;
+        let left = [0u8; 32];
+        let right = [0u8; 32];
+
+        let base = gpu.batch_node_hash_soa(&[level], &[left], &[right]);
+
+        // Flip one bit in the left array
+        let mut left_flipped = left;
+        left_flipped[0] ^= 1;
+        let flipped = gpu.batch_node_hash_soa(&[level], &[left_flipped], &[right]);
+
+        assert_ne!(base[0], flipped[0], "Flipping one bit should change the hash");
+
+        // Count differing bits (avalanche effect)
+        let mut diff_bits = 0u32;
+        for j in 0..32 {
+            diff_bits += (base[0][j] ^ flipped[0][j]).count_ones();
+        }
+        // Expect roughly 128 bits to differ (50% of 256)
+        assert!(
+            diff_bits > 80 && diff_bits < 180,
+            "Avalanche: expected ~128 diff bits, got {}",
+            diff_bits
+        );
+    }
 }

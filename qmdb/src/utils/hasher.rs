@@ -88,3 +88,16 @@ pub fn batch_hash_variable_gpu(
 ) -> Vec<Hash32> {
     gpu.batch_hash_variable(inputs)
 }
+
+/// Batch node hash using GPU with SoA (Structure-of-Arrays) layout.
+/// SoA enables coalesced GPU memory reads for improved bandwidth utilization.
+#[cfg(feature = "cuda")]
+pub fn batch_node_hash_soa_gpu(
+    gpu: &crate::gpu::GpuHasher,
+    levels: &[u8],
+    lefts: &[[u8; 32]],
+    rights: &[[u8; 32]],
+    out: &mut [[u8; 32]],
+) {
+    gpu.batch_node_hash_soa_into(levels, lefts, rights, out);
+}

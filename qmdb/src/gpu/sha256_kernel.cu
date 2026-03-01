@@ -353,3 +353,72 @@ extern "C" __global__ void sha256_node_hash_warp_coop(
     // Each thread writes its 4-byte state word
     store_be32(&output[lane * 4], my_state);
 }
+
+// ============================================================
+// Kernel 4: Fixed 65-byte node hash with Structure-of-Arrays layout
+//
+// Instead of AoS: [level0|left0|right0|level1|left1|right1|...]
+// Uses SoA:       levels[N], lefts[N*32], rights[N*32]
+//
+// Adjacent threads read adjacent 32-byte blocks from lefts/rights,
+// enabling coalesced global memory reads (32B stride vs 65B stride).
+// ============================================================
+extern "C" __global__ void sha256_node_hash_soa(
+    const uint8_t* __restrict__ levels,
+    const uint8_t* __restrict__ lefts,
+    const uint8_t* __restrict__ rights,
+    uint8_t* __restrict__ out,
+    uint32_t count
+) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+
+    uint8_t* output = out + idx * 32;
+
+    // Assemble the 65-byte message in registers from SoA arrays:
+    //   byte 0:     levels[idx]
+    //   bytes 1-32: lefts[idx*32 .. idx*32+32]
+    //   bytes 33-64: rights[idx*32 .. idx*32+32]
+    uint8_t block1[64];
+    block1[0] = levels[idx];
+
+    // Coalesced 32-byte read from lefts array (adjacent threads read adjacent 32B blocks)
+    const uint8_t* left_ptr = lefts + idx * 32;
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        block1[1 + i] = left_ptr[i];
+    }
+
+    // Coalesced 32-byte read from rights array
+    const uint8_t* right_ptr = rights + idx * 32;
+    #pragma unroll
+    for (int i = 0; i < 31; i++) {
+        block1[33 + i] = right_ptr[i];
+    }
+
+    // SHA256 init
+    uint32_t state[8];
+    #pragma unroll
+    for (int i = 0; i < 8; i++) state[i] = H_INIT[i];
+
+    // Block 1: first 64 bytes = [level(1) | left(32) | right[0..31](31)]
+    sha256_compress(state, block1);
+
+    // Block 2: last 1 byte of right + padding + length
+    uint8_t block2[64];
+    block2[0] = right_ptr[31];          // the 65th byte (right[31])
+    block2[1] = 0x80;                   // padding start
+    #pragma unroll
+    for (int i = 2; i < 56; i++) block2[i] = 0;
+    // Length in bits = 65 * 8 = 520 = 0x208
+    block2[56] = 0; block2[57] = 0; block2[58] = 0; block2[59] = 0;
+    block2[60] = 0; block2[61] = 0; block2[62] = 0x02; block2[63] = 0x08;
+
+    sha256_compress(state, block2);
+
+    // Write output (big-endian)
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        store_be32(&output[i * 4], state[i]);
+    }
+}

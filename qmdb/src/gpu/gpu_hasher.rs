@@ -22,12 +22,20 @@ const PTX_SRC: &str = include_str!("sha256_kernel.cu");
 /// Pre-allocated host and device buffers for GPU batch operations.
 /// Avoids per-call heap allocation and CUDA device memory allocation.
 struct GpuBuffers {
-    // Node hash: pre-allocated device buffers
+    // Node hash (AoS): pre-allocated device buffers
     d_node_input: CudaSlice<u8>,  // max_batch_size * 65
     d_node_output: CudaSlice<u8>, // max_batch_size * 32
-    // Node hash: pre-allocated host buffers
+    // Node hash (AoS): pre-allocated host buffers
     h_node_input: Vec<u8>,  // max_batch_size * 65
     h_node_output: Vec<u8>, // max_batch_size * 32
+    // Node hash (SoA): pre-allocated device buffers
+    d_soa_levels: CudaSlice<u8>,  // max_batch_size * 1
+    d_soa_lefts: CudaSlice<u8>,   // max_batch_size * 32
+    d_soa_rights: CudaSlice<u8>,  // max_batch_size * 32
+    // Node hash (SoA): pre-allocated host buffers
+    h_soa_levels: Vec<u8>,        // max_batch_size * 1
+    h_soa_lefts: Vec<u8>,         // max_batch_size * 32
+    h_soa_rights: Vec<u8>,        // max_batch_size * 32
     // Variable hash: pre-allocated device output + host output
     d_var_output: CudaSlice<u8>, // max_batch_size * 32
     h_var_output: Vec<u8>,       // max_batch_size * 32
@@ -46,6 +54,7 @@ pub struct GpuHasher {
     node_hash_fn: CudaFunction,
     var_hash_fn: CudaFunction,
     warp_coop_fn: CudaFunction,
+    soa_hash_fn: CudaFunction,
     max_batch_size: usize,
     bufs: Mutex<GpuBuffers>,
 }
@@ -82,6 +91,7 @@ impl GpuHasher {
                     "sha256_node_hash",
                     "sha256_variable_hash",
                     "sha256_node_hash_warp_coop",
+                    "sha256_node_hash_soa",
                 ],
             )
             .map_err(|e| format!("PTX load failed: {}", e))?;
@@ -98,13 +108,29 @@ impl GpuHasher {
             .get_func("sha256", "sha256_node_hash_warp_coop")
             .ok_or_else(|| "sha256_node_hash_warp_coop function not found".to_string())?;
 
-        // Pre-allocate persistent device buffers
+        let soa_hash_fn = device
+            .get_func("sha256", "sha256_node_hash_soa")
+            .ok_or_else(|| "sha256_node_hash_soa function not found".to_string())?;
+
+        // Pre-allocate persistent device buffers (AoS)
         let d_node_input: CudaSlice<u8> = device
             .alloc_zeros(max_batch_size * 65)
             .map_err(|e| format!("GPU node input alloc failed: {}", e))?;
         let d_node_output: CudaSlice<u8> = device
             .alloc_zeros(max_batch_size * 32)
             .map_err(|e| format!("GPU node output alloc failed: {}", e))?;
+
+        // Pre-allocate persistent device buffers (SoA)
+        let d_soa_levels: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size)
+            .map_err(|e| format!("GPU SoA levels alloc failed: {}", e))?;
+        let d_soa_lefts: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU SoA lefts alloc failed: {}", e))?;
+        let d_soa_rights: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU SoA rights alloc failed: {}", e))?;
+
         let d_var_output: CudaSlice<u8> = device
             .alloc_zeros(max_batch_size * 32)
             .map_err(|e| format!("GPU var output alloc failed: {}", e))?;
@@ -114,6 +140,12 @@ impl GpuHasher {
             d_node_output,
             h_node_input: vec![0u8; max_batch_size * 65],
             h_node_output: vec![0u8; max_batch_size * 32],
+            d_soa_levels: d_soa_levels,
+            d_soa_lefts: d_soa_lefts,
+            d_soa_rights: d_soa_rights,
+            h_soa_levels: vec![0u8; max_batch_size],
+            h_soa_lefts: vec![0u8; max_batch_size * 32],
+            h_soa_rights: vec![0u8; max_batch_size * 32],
             d_var_output,
             h_var_output: vec![0u8; max_batch_size * 32],
         });
@@ -123,6 +155,7 @@ impl GpuHasher {
             node_hash_fn,
             var_hash_fn,
             warp_coop_fn,
+            soa_hash_fn,
             max_batch_size,
             bufs,
         })
@@ -290,6 +323,135 @@ impl GpuHasher {
         result
     }
 
+    /// Batch-hash N fixed 65-byte node inputs using Structure-of-Arrays layout.
+    /// Input is provided as three separate slices: levels, lefts, rights.
+    ///
+    /// SoA layout enables coalesced GPU memory reads: adjacent threads read
+    /// adjacent 32-byte blocks from the lefts/rights arrays (32B stride)
+    /// instead of the AoS 65-byte stride, improving memory bandwidth utilization.
+    ///
+    /// Functionally identical to `batch_node_hash` — produces byte-identical results.
+    pub fn batch_node_hash_soa(
+        &self,
+        levels: &[u8],
+        lefts: &[[u8; 32]],
+        rights: &[[u8; 32]],
+    ) -> Vec<[u8; 32]> {
+        let n = levels.len();
+        assert_eq!(n, lefts.len(), "levels and lefts length mismatch");
+        assert_eq!(n, rights.len(), "levels and rights length mismatch");
+        if n == 0 {
+            return Vec::new();
+        }
+        assert!(
+            n <= self.max_batch_size,
+            "batch size {} exceeds max {}",
+            n,
+            self.max_batch_size
+        );
+
+        let mut bufs = self.bufs.lock();
+
+        // Copy levels into host buffer (contiguous)
+        bufs.h_soa_levels[..n].copy_from_slice(levels);
+
+        // Copy lefts into host buffer (flatten [u8; 32] → contiguous bytes)
+        for (i, left) in lefts.iter().enumerate() {
+            bufs.h_soa_lefts[i * 32..(i + 1) * 32].copy_from_slice(left);
+        }
+
+        // Copy rights into host buffer
+        for (i, right) in rights.iter().enumerate() {
+            bufs.h_soa_rights[i * 32..(i + 1) * 32].copy_from_slice(right);
+        }
+
+        // Async upload three separate arrays
+        let stream = *self.device.cu_stream();
+        unsafe {
+            result::memcpy_htod_async(
+                *bufs.d_soa_levels.device_ptr(),
+                &bufs.h_soa_levels[..n],
+                stream,
+            )
+            .expect("GPU SoA levels upload failed");
+
+            result::memcpy_htod_async(
+                *bufs.d_soa_lefts.device_ptr(),
+                &bufs.h_soa_lefts[..n * 32],
+                stream,
+            )
+            .expect("GPU SoA lefts upload failed");
+
+            result::memcpy_htod_async(
+                *bufs.d_soa_rights.device_ptr(),
+                &bufs.h_soa_rights[..n * 32],
+                stream,
+            )
+            .expect("GPU SoA rights upload failed");
+        }
+
+        // Launch SoA kernel
+        let grid = ((n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
+        let cfg = LaunchConfig {
+            grid_dim: grid,
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.soa_hash_fn
+                .clone()
+                .launch(
+                    cfg,
+                    (
+                        &bufs.d_soa_levels,
+                        &bufs.d_soa_lefts,
+                        &bufs.d_soa_rights,
+                        &bufs.d_node_output,
+                        n as u32,
+                    ),
+                )
+                .expect("GPU SoA kernel launch failed");
+        }
+
+        // Async download
+        let d_out_ptr = *bufs.d_node_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_node_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
+            .expect("GPU SoA output download failed");
+        }
+
+        self.device.synchronize().expect("GPU sync failed");
+
+        let mut result = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bufs.h_node_output[i * 32..(i + 1) * 32]);
+            result.push(hash);
+        }
+        result
+    }
+
+    /// Batch-hash N fixed 65-byte node inputs using SoA layout, writing into an output slice.
+    pub fn batch_node_hash_soa_into(
+        &self,
+        levels: &[u8],
+        lefts: &[[u8; 32]],
+        rights: &[[u8; 32]],
+        out: &mut [[u8; 32]],
+    ) {
+        assert_eq!(levels.len(), out.len(), "levels and output length mismatch");
+        if levels.is_empty() {
+            return;
+        }
+        let hashes = self.batch_node_hash_soa(levels, lefts, rights);
+        out.copy_from_slice(&hashes);
+    }
+
     /// Batch-hash N variable-length inputs on the GPU.
     /// Each input can be any length (typically 50-300 bytes for entries).
     /// Returns N x [u8; 32] hashes, byte-identical to CPU `hasher::hash`.
@@ -423,6 +585,18 @@ impl MultiGpuHasher {
     /// Batch-hash variable-length inputs on a specific GPU (selected by shard_id).
     pub fn batch_hash_variable(&self, shard_id: usize, inputs: &[&[u8]]) -> Vec<[u8; 32]> {
         self.for_shard(shard_id).batch_hash_variable(inputs)
+    }
+
+    /// Batch-hash using SoA layout on a specific GPU (selected by shard_id).
+    pub fn batch_node_hash_soa(
+        &self,
+        shard_id: usize,
+        levels: &[u8],
+        lefts: &[[u8; 32]],
+        rights: &[[u8; 32]],
+    ) -> Vec<[u8; 32]> {
+        self.for_shard(shard_id)
+            .batch_node_hash_soa(levels, lefts, rights)
     }
 }
 
