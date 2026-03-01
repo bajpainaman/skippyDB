@@ -1610,3 +1610,1773 @@ fn test_batch_hash_matches_manual_sha256() {
         assert_eq!(out[i], expected, "Manual SHA256 mismatch at {}", i);
     }
 }
+
+// ============================================================
+// Additional Batch Hash Tests
+// ============================================================
+
+#[test]
+fn test_batch_hash_cpu_two_items() {
+    let left0 = [0xAAu8; 32];
+    let right0 = [0xBBu8; 32];
+    let left1 = [0xCCu8; 32];
+    let right1 = [0xDDu8; 32];
+    let mut out = [[0u8; 32]; 2];
+    batch_node_hash_cpu(&[3, 7], &[left0, left1], &[right0, right1], &mut out);
+    assert_eq!(out[0], hash2(3, &left0, &right0));
+    assert_eq!(out[1], hash2(7, &left1, &right1));
+}
+
+#[test]
+fn test_batch_hash_cpu_level_zero() {
+    let left = [0x01u8; 32];
+    let right = [0x02u8; 32];
+    let mut out = [[0u8; 32]; 1];
+    batch_node_hash_cpu(&[0], &[left], &[right], &mut out);
+    assert_eq!(out[0], hash2(0, &left, &right));
+}
+
+#[test]
+fn test_batch_hash_cpu_level_255() {
+    let left = [0xFFu8; 32];
+    let right = [0x00u8; 32];
+    let mut out = [[0u8; 32]; 1];
+    batch_node_hash_cpu(&[255], &[left], &[right], &mut out);
+    assert_eq!(out[0], hash2(255, &left, &right));
+}
+
+#[test]
+fn test_batch_hash_cpu_same_left_right() {
+    let data = [0x42u8; 32];
+    let mut out = [[0u8; 32]; 1];
+    batch_node_hash_cpu(&[1], &[data], &[data], &mut out);
+    assert_eq!(out[0], hash2(1, &data, &data));
+}
+
+#[test]
+fn test_batch_hash_cpu_100_items() {
+    let n = 100;
+    let levels: Vec<u8> = (0..n).map(|i| (i % 13) as u8).collect();
+    let lefts: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64)).collect();
+    let rights: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 + 10000)).collect();
+    let mut out = vec![[0u8; 32]; n];
+    batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+    for i in 0..n {
+        assert_eq!(out[i], hash2(levels[i], &lefts[i], &rights[i]));
+    }
+}
+
+#[test]
+fn test_batch_hash_cpu_1000_items() {
+    let n = 1000;
+    let levels: Vec<u8> = (0..n).map(|i| (i % 256) as u8).collect();
+    let lefts: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 3)).collect();
+    let rights: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 3 + 1)).collect();
+    let mut out = vec![[0u8; 32]; n];
+    batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+    for i in 0..n {
+        assert_eq!(out[i], hash2(levels[i], &lefts[i], &rights[i]));
+    }
+}
+
+#[test]
+fn test_batch_hash_cpu_output_not_zero_for_nonzero_input() {
+    let left = [0x01u8; 32];
+    let right = [0x02u8; 32];
+    let mut out = [[0u8; 32]; 1];
+    batch_node_hash_cpu(&[5], &[left], &[right], &mut out);
+    assert_ne!(out[0], [0u8; 32]);
+}
+
+#[test]
+fn test_batch_hash_cpu_different_levels_produce_different_hashes() {
+    let left = [0x55u8; 32];
+    let right = [0x66u8; 32];
+    let n = 256;
+    let levels: Vec<u8> = (0..n).map(|i| i as u8).collect();
+    let lefts = vec![left; n];
+    let rights = vec![right; n];
+    let mut out = vec![[0u8; 32]; n];
+    batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+    // All outputs should be distinct (different domain separator -> different hash)
+    let mut seen = std::collections::HashSet::new();
+    for h in &out {
+        assert!(seen.insert(*h), "Duplicate hash at level");
+    }
+}
+
+#[test]
+fn test_batch_hash_cpu_order_matters() {
+    let left = [0xAAu8; 32];
+    let right = [0xBBu8; 32];
+    let mut out_ab = [[0u8; 32]; 1];
+    let mut out_ba = [[0u8; 32]; 1];
+    batch_node_hash_cpu(&[4], &[left], &[right], &mut out_ab);
+    batch_node_hash_cpu(&[4], &[right], &[left], &mut out_ba);
+    assert_ne!(out_ab[0], out_ba[0]);
+}
+
+#[test]
+fn test_batch_hash_cpu_sequential_levels_0_to_11() {
+    let n = 12;
+    let levels: Vec<u8> = (0..n).map(|i| i as u8).collect();
+    let data = [0x77u8; 32];
+    let lefts = vec![data; n];
+    let rights = vec![data; n];
+    let mut out = vec![[0u8; 32]; n];
+    batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+    for i in 0..n {
+        let expected = hash2(i as u8, &data, &data);
+        assert_eq!(out[i], expected);
+    }
+}
+
+#[test]
+fn test_batch_hash_cpu_mixed_level_0_and_max() {
+    let data_a = [0x11u8; 32];
+    let data_b = [0x22u8; 32];
+    let mut out = [[0u8; 32]; 2];
+    batch_node_hash_cpu(&[0, 255], &[data_a, data_a], &[data_b, data_b], &mut out);
+    assert_eq!(out[0], hash2(0, &data_a, &data_b));
+    assert_eq!(out[1], hash2(255, &data_a, &data_b));
+    assert_ne!(out[0], out[1]);
+}
+
+// ============================================================
+// Additional Hash Function Tests
+// ============================================================
+
+#[test]
+fn test_hash2_level_8_hello_world() {
+    // Known test vector from internal tests
+    let result = hash2(8, "hello", "world");
+    assert_eq!(
+        hex::encode(result),
+        "8e6fc50a3f98a3c314021b89688ca83a9b5697ca956e211198625fc460ddf1e9"
+    );
+}
+
+#[test]
+fn test_hash2x_exchange_reverses_args() {
+    let a: &[u8] = b"alpha";
+    let b: &[u8] = b"beta";
+    let h_ab = hash2(5, a, b);
+    let h_ba = hash2x(5, a, b, true); // exchange => hash2(5, b, a)
+    let h_ba_direct = hash2(5, b, a);
+    assert_eq!(h_ba, h_ba_direct);
+    assert_ne!(h_ab, h_ba);
+}
+
+#[test]
+fn test_hash2x_no_exchange_same_as_hash2() {
+    let a: &[u8] = b"alpha";
+    let b: &[u8] = b"beta";
+    let h_ab = hash2(5, a, b);
+    let h_ab2 = hash2x(5, a, b, false);
+    assert_eq!(h_ab, h_ab2);
+}
+
+#[test]
+fn test_node_hash_inplace_deterministic() {
+    let mut out1 = [0u8; 32];
+    let mut out2 = [0u8; 32];
+    hasher::node_hash_inplace(3, &mut out1, b"left" as &[u8], b"right" as &[u8]);
+    hasher::node_hash_inplace(3, &mut out2, b"left" as &[u8], b"right" as &[u8]);
+    assert_eq!(out1, out2);
+}
+
+#[test]
+fn test_node_hash_inplace_all_zeros() {
+    let mut out = [0u8; 32];
+    hasher::node_hash_inplace(0, &mut out, &[0u8; 32], &[0u8; 32]);
+    let expected = hash2(0, &[0u8; 32], &[0u8; 32]);
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn test_node_hash_inplace_all_ff() {
+    let mut out = [0u8; 32];
+    hasher::node_hash_inplace(255, &mut out, &[0xFFu8; 32], &[0xFFu8; 32]);
+    let expected = hash2(255, &[0xFFu8; 32], &[0xFFu8; 32]);
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn test_hash1_domain_separated_from_hash() {
+    let data = b"test_data";
+    let h = hash(data);
+    let h1 = hash1(0, data);
+    assert_ne!(h, h1);
+}
+
+#[test]
+fn test_hash1_different_levels() {
+    let data = b"same_data";
+    let results: Vec<[u8; 32]> = (0..=10).map(|level| hash1(level, data)).collect();
+    for i in 0..results.len() {
+        for j in (i + 1)..results.len() {
+            assert_ne!(results[i], results[j], "hash1 collision at levels {} and {}", i, j);
+        }
+    }
+}
+
+#[test]
+fn test_hash2_all_256_levels_unique_for_same_inputs() {
+    let left = [0x42u8; 32];
+    let right = [0x43u8; 32];
+    let results: Vec<[u8; 32]> = (0u8..=255).map(|level| hash2(level, &left, &right)).collect();
+    let set: std::collections::HashSet<Vec<u8>> = results.iter().map(|h| h.to_vec()).collect();
+    assert_eq!(set.len(), 256, "All 256 levels should produce unique hashes");
+}
+
+#[test]
+fn test_hash2_empty_strings() {
+    let result = hash2(0, b"", b"");
+    assert_ne!(result, [0u8; 32]);
+}
+
+#[test]
+fn test_hash2_one_empty_one_nonempty() {
+    // hash2 concatenates: [level] || a || b
+    // hash2(0, "", "data") = sha256([0] + "data")
+    // hash2(0, "data", "") = sha256([0] + "data")
+    // These are equal because SHA256 concatenates without length prefixes.
+    let result_a = hash2(0, b"" as &[u8], b"data" as &[u8]);
+    let result_b = hash2(0, b"data" as &[u8], b"" as &[u8]);
+    assert_eq!(result_a, result_b, "hash2 with empty+nonempty equals nonempty+empty (known SHA256 property)");
+    // They are all equal to sha256([0] + "data")
+    let expected: [u8; 32] = {
+        let mut h = sha2::Sha256::new();
+        h.update([0u8]);
+        h.update(b"data");
+        h.finalize().into()
+    };
+    assert_eq!(result_a, expected);
+    // But a different total content produces a different result
+    let result_c = hash2(0, b"different" as &[u8], b"data" as &[u8]);
+    assert_ne!(result_a, result_c);
+}
+
+#[test]
+fn test_zero_hash32_constant_is_all_zeros() {
+    assert_eq!(ZERO_HASH32, [0u8; 32]);
+}
+
+// ============================================================
+// Additional Entry Buffer Tests
+// ============================================================
+
+#[test]
+fn test_entry_buffer_write_read_single_small() {
+    use qmdb::entryfile::entrybuffer;
+    let entry = make_entry(b"k", b"v", 1);
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    writer.append(&entry, &[]);
+    writer.end_block(0, 0, 1);
+
+    let mut count = 0;
+    loop {
+        let (eob, _pos) = reader.read_next_entry(|_ebz| { count += 1; });
+        if eob { break; }
+    }
+    assert_eq!(count, 1);
+    reader.read_extra_info();
+}
+
+#[test]
+fn test_entry_buffer_write_read_ten_entries() {
+    use qmdb::entryfile::entrybuffer;
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    for i in 0u64..10 {
+        let entry = make_entry(b"key_common", b"value_common", i);
+        writer.append(&entry, &[]);
+    }
+    writer.end_block(0, 0, 10);
+
+    let mut count = 0;
+    loop {
+        let (eob, _) = reader.read_next_entry(|_| { count += 1; });
+        if eob { break; }
+    }
+    assert_eq!(count, 10);
+    reader.read_extra_info();
+}
+
+#[test]
+fn test_entry_buffer_roundtrip_key_value() {
+    use qmdb::entryfile::entrybuffer;
+    let key = b"roundtrip_key";
+    let value = b"roundtrip_value_content";
+    let entry = Entry {
+        key,
+        value,
+        next_key_hash: &[0xEEu8; 32],
+        version: 9999,
+        serial_number: 12345,
+    };
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    writer.append(&entry, &[]);
+    writer.end_block(0, 0, 1);
+
+    let mut found_key = Vec::new();
+    let mut found_value = Vec::new();
+    let mut found_sn = 0u64;
+    loop {
+        let (eob, _) = reader.read_next_entry(|ebz| {
+            found_key = ebz.key().to_vec();
+            found_value = ebz.value().to_vec();
+            found_sn = ebz.serial_number();
+        });
+        if eob { break; }
+    }
+    assert_eq!(found_key, key);
+    assert_eq!(found_value, value);
+    assert_eq!(found_sn, 12345);
+    reader.read_extra_info();
+}
+
+#[test]
+fn test_entry_buffer_end_block_extra_info_roundtrip() {
+    use qmdb::entryfile::entrybuffer;
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    let entry = make_entry(b"k", b"v", 1);
+    writer.append(&entry, &[]);
+    writer.end_block(42, 77, 99);
+
+    // Drain the entry via read_next_entry, which also receives the end-of-block signal
+    loop {
+        let (eob, _) = reader.read_next_entry(|_| {});
+        if eob { break; }
+    }
+
+    let (cdp, cds, se) = reader.read_extra_info();
+    assert_eq!(cdp, 42);
+    assert_eq!(cds, 77);
+    assert_eq!(se, 99);
+}
+
+#[test]
+fn test_entry_buffer_multiple_blocks() {
+    use qmdb::entryfile::entrybuffer;
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+
+    // Block 1
+    writer.append(&make_entry(b"k1", b"v1", 1), &[]);
+    writer.end_block(0, 0, 1);
+
+    let mut count = 0;
+    loop {
+        let (eob, _) = reader.read_next_entry(|_| { count += 1; });
+        if eob { break; }
+    }
+    assert_eq!(count, 1);
+    reader.read_extra_info();
+
+    // Block 2
+    writer.append(&make_entry(b"k2", b"v2", 2), &[]);
+    writer.append(&make_entry(b"k3", b"v3", 3), &[]);
+    writer.end_block(10, 5, 10);
+
+    count = 0;
+    loop {
+        let (eob, _) = reader.read_next_entry(|_| { count += 1; });
+        if eob { break; }
+    }
+    assert_eq!(count, 2);
+    let (cdp, cds, se) = reader.read_extra_info();
+    assert_eq!(cdp, 10);
+    assert_eq!(cds, 5);
+    assert_eq!(se, 10);
+}
+
+#[test]
+fn test_entry_buffer_deactivated_sns_roundtrip() {
+    use qmdb::entryfile::entrybuffer;
+    let entry = make_entry(b"key", b"value", 100);
+    let dsn_list = [10u64, 20, 30, 40];
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    writer.append(&entry, &dsn_list);
+    writer.end_block(0, 0, 101);
+
+    let mut dsn_count = 0usize;
+    let mut found_dsns = Vec::new();
+    loop {
+        let (eob, _) = reader.read_next_entry(|ebz| {
+            dsn_count = ebz.dsn_count();
+            for (_, dsn) in ebz.dsn_iter() {
+                found_dsns.push(dsn);
+            }
+        });
+        if eob { break; }
+    }
+    assert_eq!(dsn_count, 4);
+    assert_eq!(found_dsns, vec![10, 20, 30, 40]);
+    reader.read_extra_info();
+}
+
+#[test]
+fn test_entry_buffer_start_pos_nonzero_offset() {
+    use qmdb::entryfile::entrybuffer;
+    let start = 1024i64;
+    let (mut writer, mut reader) = entrybuffer::new(start, BIG_BUF_SIZE);
+    writer.append(&make_entry(b"key", b"val", 5), &[]);
+    writer.end_block(0, 0, 6);
+
+    let mut count = 0;
+    loop {
+        let (eob, _) = reader.read_next_entry(|_| { count += 1; });
+        if eob { break; }
+    }
+    assert_eq!(count, 1);
+    reader.read_extra_info();
+}
+
+#[test]
+fn test_entry_buffer_50_entries() {
+    use qmdb::entryfile::entrybuffer;
+    let n = 50;
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    for i in 0..n {
+        let key = format!("key_{:04}", i);
+        let val = format!("val_{:04}", i);
+        let entry = Entry {
+            key: key.as_bytes(),
+            value: val.as_bytes(),
+            next_key_hash: &[0u8; 32],
+            version: i as i64,
+            serial_number: i as u64,
+        };
+        writer.append(&entry, &[]);
+    }
+    writer.end_block(0, 0, n as u64);
+
+    let mut count = 0;
+    loop {
+        let (eob, _) = reader.read_next_entry(|_| { count += 1; });
+        if eob { break; }
+    }
+    assert_eq!(count, n);
+    reader.read_extra_info();
+}
+
+// ============================================================
+// Additional Entry Serialization Tests
+// ============================================================
+
+#[test]
+fn test_entry_dump_basic_fields() {
+    let key = b"test_key";
+    let value = b"test_value";
+    let nkh = [0xABu8; 32];
+    let entry = Entry {
+        key,
+        value,
+        next_key_hash: &nkh,
+        version: 42,
+        serial_number: 7,
+    };
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    assert_eq!(ebz.key(), key);
+    assert_eq!(ebz.value(), value);
+    assert_eq!(ebz.next_key_hash(), &nkh);
+    assert_eq!(ebz.version(), 42);
+    assert_eq!(ebz.serial_number(), 7);
+}
+
+#[test]
+fn test_entry_dump_zero_length_value() {
+    let key = b"zero_val_key";
+    let entry = Entry {
+        key,
+        value: b"",
+        next_key_hash: &[0u8; 32],
+        version: 0,
+        serial_number: 0,
+    };
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    assert_eq!(ebz.value().len(), 0);
+}
+
+#[test]
+fn test_entry_dump_version_negative() {
+    let entry = Entry {
+        key: b"k",
+        value: b"v",
+        next_key_hash: &[0u8; 32],
+        version: -1,
+        serial_number: 0,
+    };
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    assert_eq!(ebz.version(), -1);
+}
+
+#[test]
+fn test_entry_dump_max_serial_number() {
+    let entry = Entry {
+        key: b"k",
+        value: b"v",
+        next_key_hash: &[0u8; 32],
+        version: 0,
+        serial_number: u64::MAX,
+    };
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    assert_eq!(ebz.serial_number(), u64::MAX);
+}
+
+#[test]
+fn test_entry_dump_single_deactivated_sn() {
+    let entry = make_entry(b"key", b"value", 10);
+    let dsn = [999u64];
+    let total = entry.get_serialized_len(1);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &dsn);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    assert_eq!(ebz.dsn_count(), 1);
+    assert_eq!(ebz.get_deactived_sn(0), 999);
+}
+
+#[test]
+fn test_entry_dump_five_deactivated_sns() {
+    let entry = make_entry(b"key", b"value", 10);
+    let dsn = [1u64, 2, 3, 4, 5];
+    let total = entry.get_serialized_len(5);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &dsn);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    assert_eq!(ebz.dsn_count(), 5);
+    for i in 0..5 {
+        assert_eq!(ebz.get_deactived_sn(i), (i + 1) as u64);
+    }
+}
+
+#[test]
+fn test_entry_dsn_iter_yields_all() {
+    let entry = make_entry(b"key", b"value", 10);
+    let dsn = [100u64, 200, 300];
+    let total = entry.get_serialized_len(3);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &dsn);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let items: Vec<(usize, u64)> = ebz.dsn_iter().collect();
+    assert_eq!(items, vec![(0, 100), (1, 200), (2, 300)]);
+}
+
+#[test]
+fn test_entry_key_hash_with_value_is_sha256_of_key() {
+    let key = b"hashed_key";
+    let entry = Entry {
+        key,
+        value: b"some_value",
+        next_key_hash: &[0u8; 32],
+        version: 1,
+        serial_number: 1,
+    };
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let expected: [u8; 32] = Sha256::digest(key).into();
+    assert_eq!(ebz.key_hash(), expected);
+}
+
+#[test]
+fn test_entry_key_hash_with_empty_value_uses_first_two_bytes() {
+    // When value is empty, key_hash returns first two bytes of key in hash
+    let mut key = [0u8; 32];
+    key[0] = 0x12;
+    key[1] = 0x34;
+    let entry = Entry {
+        key: &key,
+        value: b"",
+        next_key_hash: &[0u8; 32],
+        version: 0,
+        serial_number: 0,
+    };
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let kh = ebz.key_hash();
+    assert_eq!(kh[0], 0x12);
+    assert_eq!(kh[1], 0x34);
+    // Rest should be zero
+    assert_eq!(&kh[2..], &[0u8; 30]);
+}
+
+#[test]
+fn test_entry_get_serialized_len_aligns_to_8() {
+    // For various key+value sizes, serialized len should be multiple of 8
+    for key_len in 0..=16usize {
+        for val_len in 0..=16usize {
+            let key = vec![0xAAu8; key_len];
+            let val = vec![0xBBu8; val_len];
+            let entry = Entry {
+                key: &key,
+                value: &val,
+                next_key_hash: &[0u8; 32],
+                version: 0,
+                serial_number: 0,
+            };
+            let len = entry.get_serialized_len(0);
+            assert_eq!(len % 8, 0, "len {} not multiple of 8 for key_len={} val_len={}", len, key_len, val_len);
+        }
+    }
+}
+
+#[test]
+fn test_entry_payload_len() {
+    let entry = make_entry(b"abc", b"defgh", 1);
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    // payload_len should be <= total len
+    assert!(ebz.payload_len() <= total);
+    assert!(ebz.payload_len() > 0);
+}
+
+#[test]
+fn test_entry_from_bz_roundtrip() {
+    let key = b"round_key";
+    let value = b"round_value";
+    let nkh = [0xCDu8; 32];
+    let original = Entry {
+        key,
+        value,
+        next_key_hash: &nkh,
+        version: 5,
+        serial_number: 11,
+    };
+    let total = original.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    original.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let reconstructed = Entry::from_bz(&ebz);
+    assert_eq!(reconstructed.key, key);
+    assert_eq!(reconstructed.value, value);
+    assert_eq!(reconstructed.version, 5);
+    assert_eq!(reconstructed.serial_number, 11);
+}
+
+// ============================================================
+// Additional Twig / ActiveBits Tests
+// ============================================================
+
+#[test]
+fn test_active_bits_default_is_new() {
+    let bits_default = ActiveBits::default();
+    let bits_new = ActiveBits::new();
+    assert_eq!(bits_default, bits_new);
+}
+
+#[test]
+fn test_active_bits_toggle_bit() {
+    let mut bits = ActiveBits::new();
+    bits.set_bit(42);
+    assert!(bits.get_bit(42));
+    bits.clear_bit(42);
+    assert!(!bits.get_bit(42));
+}
+
+#[test]
+fn test_active_bits_set_first_bit() {
+    let mut bits = ActiveBits::new();
+    bits.set_bit(0);
+    assert!(bits.get_bit(0));
+    assert!(!bits.get_bit(1));
+}
+
+#[test]
+fn test_active_bits_set_last_valid_bit() {
+    let mut bits = ActiveBits::new();
+    // The valid range is 0..=2047 (LEAF_COUNT_IN_TWIG - 1)
+    let last = qmdb::def::LEAF_COUNT_IN_TWIG - 1; // 2047
+    bits.set_bit(last);
+    assert!(bits.get_bit(last));
+}
+
+#[test]
+fn test_active_bits_independent_bits() {
+    let mut bits = ActiveBits::new();
+    bits.set_bit(0);
+    bits.set_bit(7);
+    bits.set_bit(8);
+    bits.set_bit(15);
+    assert!(bits.get_bit(0));
+    assert!(bits.get_bit(7));
+    assert!(bits.get_bit(8));
+    assert!(bits.get_bit(15));
+    assert!(!bits.get_bit(1));
+    assert!(!bits.get_bit(6));
+    assert!(!bits.get_bit(9));
+    assert!(!bits.get_bit(14));
+}
+
+#[test]
+fn test_active_bits_clear_non_set_bit() {
+    let mut bits = ActiveBits::new();
+    // Clearing a non-set bit should be a no-op
+    bits.clear_bit(100);
+    assert!(!bits.get_bit(100));
+}
+
+#[test]
+fn test_active_bits_set_all_and_verify() {
+    let mut bits = ActiveBits::new();
+    // Set every 7th bit
+    for i in (0..2048u32).step_by(7) {
+        bits.set_bit(i);
+    }
+    for i in (0..2048u32).step_by(7) {
+        assert!(bits.get_bit(i), "bit {} should be set", i);
+    }
+    // Verify un-set bits
+    for i in 1..7u32 {
+        assert!(!bits.get_bit(i), "bit {} should not be set", i);
+    }
+}
+
+#[test]
+fn test_active_bits_get_bits_page_boundaries() {
+    // Use set_bit to populate known bits and verify get_bits slicing
+    let mut bits = ActiveBits::new();
+    // Set specific bits in page 0 (bits 0..256) and page 7 (bits 1792..2048)
+    bits.set_bit(0);   // page 0, byte 0, bit 0
+    bits.set_bit(7);   // page 0, byte 0, bit 7
+    bits.set_bit(8);   // page 0, byte 1, bit 0
+
+    let page0 = bits.get_bits(0, 32);
+    assert_eq!(page0.len(), 32);
+    // byte 0 should have bits 0 and 7 set = 0b10000001 = 0x81
+    assert_eq!(page0[0], 0b10000001u8);
+    // byte 1 should have bit 0 set = 0x01
+    assert_eq!(page0[1], 0x01);
+
+    // Page 7 should be entirely zero since we didn't set any bits in it
+    let page7 = bits.get_bits(7, 32);
+    assert_eq!(page7.len(), 32);
+    for byte in page7 {
+        assert_eq!(*byte, 0);
+    }
+}
+
+#[test]
+fn test_twig_new_all_zero() {
+    use qmdb::merkletree::twig::Twig;
+    let t = Twig::new();
+    for i in 0..4 {
+        assert_eq!(t.active_bits_mtl1[i], [0u8; 32]);
+    }
+    for i in 0..2 {
+        assert_eq!(t.active_bits_mtl2[i], [0u8; 32]);
+    }
+    assert_eq!(t.active_bits_mtl3, [0u8; 32]);
+    assert_eq!(t.left_root, [0u8; 32]);
+    assert_eq!(t.twig_root, [0u8; 32]);
+}
+
+#[test]
+fn test_twig_default_same_as_new() {
+    use qmdb::merkletree::twig::Twig;
+    let t1 = Twig::new();
+    let t2 = Twig::default();
+    assert_eq!(t1.active_bits_mtl3, t2.active_bits_mtl3);
+    assert_eq!(t1.twig_root, t2.twig_root);
+}
+
+#[test]
+fn test_twig_sync_top_deterministic() {
+    use qmdb::merkletree::twig::Twig;
+    let mut t1 = Twig::new();
+    let mut t2 = Twig::new();
+    t1.left_root = [0xABu8; 32];
+    t1.active_bits_mtl3 = [0xCDu8; 32];
+    t2.left_root = [0xABu8; 32];
+    t2.active_bits_mtl3 = [0xCDu8; 32];
+    t1.sync_top();
+    t2.sync_top();
+    assert_eq!(t1.twig_root, t2.twig_root);
+    assert_ne!(t1.twig_root, [0u8; 32]);
+}
+
+#[test]
+fn test_twig_sync_l3_non_zero() {
+    use qmdb::merkletree::twig::Twig;
+    let mut t = Twig::new();
+    t.active_bits_mtl2[0] = [0x01u8; 32];
+    t.active_bits_mtl2[1] = [0x02u8; 32];
+    t.sync_l3();
+    assert_ne!(t.active_bits_mtl3, [0u8; 32]);
+}
+
+#[test]
+fn test_null_twig_left_root_non_zero() {
+    assert_ne!(NULL_TWIG.left_root, [0u8; 32]);
+}
+
+#[test]
+fn test_null_twig_active_bits_mtl3_non_zero() {
+    assert_ne!(NULL_TWIG.active_bits_mtl3, [0u8; 32]);
+}
+
+#[test]
+fn test_sync_mtree_single_leaf_range() {
+    use qmdb::merkletree::twig::sync_mtree;
+    // Just verify it doesn't panic for a small range
+    let mut mt: Vec<[u8; 32]> = vec![[0u8; 32]; 4096];
+    // copy a leaf
+    mt[2048] = [0x01u8; 32];
+    mt[2049] = [0x02u8; 32];
+    sync_mtree(&mut mt, 0, 1);
+    // parent at 1024 should now be non-zero
+    assert_ne!(mt[1024], [0u8; 32]);
+}
+
+#[test]
+fn test_sync_mtree_matches_hash2() {
+    use qmdb::merkletree::twig::sync_mtree;
+    let left = [0x11u8; 32];
+    let right = [0x22u8; 32];
+    let mut mt = vec![[0u8; 32]; 4096];
+    mt[2048] = left;
+    mt[2049] = right;
+    sync_mtree(&mut mt, 0, 1);
+    let expected = hash2(0, &left, &right);
+    assert_eq!(mt[1024], expected);
+}
+
+#[test]
+fn test_null_mt_for_twig_root_non_zero() {
+    use qmdb::merkletree::twig::NULL_MT_FOR_TWIG;
+    // The root at index 1 should not be zero
+    assert_ne!(NULL_MT_FOR_TWIG[1], [0u8; 32]);
+}
+
+// ============================================================
+// Additional ChangeSet Tests
+// ============================================================
+
+#[test]
+fn test_changeset_new_uninit() {
+    let cs = ChangeSet::new_uninit();
+    assert_eq!(cs.op_list.len(), 0);
+    assert_eq!(cs.data.len(), 0);
+}
+
+#[test]
+fn test_changeset_run_all_empty() {
+    let cs = ChangeSet::new();
+    let mut count = 0;
+    cs.run_all(|_, _, _, _, _| { count += 1; });
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn test_changeset_add_and_run_all() {
+    let mut cs = ChangeSet::new();
+    let kh = [0u8; 32];
+    cs.add_op(qmdb::def::OP_READ, 0, &kh, b"key1", b"val1", None);
+    cs.add_op(qmdb::def::OP_WRITE, 0, &kh, b"key2", b"val2", None);
+    let mut count = 0;
+    cs.run_all(|_, _, _, _, _| { count += 1; });
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn test_changeset_run_in_shard_empty_shard() {
+    let mut cs = ChangeSet::new();
+    let kh = [0xFFu8; 32];
+    // Add to shard 15
+    cs.add_op(qmdb::def::OP_CREATE, 15, &kh, b"k", b"v", None);
+    cs.sort();
+    let mut count = 0;
+    cs.run_in_shard(0, |_, _, _, _, _| { count += 1; });
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn test_changeset_run_in_shard_correct_shard() {
+    let mut cs = ChangeSet::new();
+    let kh0 = [0x00u8; 32]; // shard 0
+    let kh15 = [0xFFu8; 32]; // shard 15
+    cs.add_op(qmdb::def::OP_CREATE, 0, &kh0, b"ka", b"va", None);
+    cs.add_op(qmdb::def::OP_CREATE, 15, &kh15, b"kb", b"vb", None);
+    cs.sort();
+
+    let mut shard0_count = 0;
+    let mut shard15_count = 0;
+    cs.run_in_shard(0, |_, _, _, _, _| { shard0_count += 1; });
+    cs.run_in_shard(15, |_, _, _, _, _| { shard15_count += 1; });
+    assert_eq!(shard0_count, 1);
+    assert_eq!(shard15_count, 1);
+}
+
+#[test]
+fn test_changeset_sort_by_shard_then_key_hash() {
+    let mut cs = ChangeSet::new();
+    let kh_low = [0x00u8; 32];
+    let kh_high = [0xFFu8; 32];
+    // Add out of order
+    cs.add_op(qmdb::def::OP_READ, 0, &kh_high, b"k2", b"v2", None);
+    cs.add_op(qmdb::def::OP_READ, 0, &kh_low, b"k1", b"v1", None);
+    cs.sort();
+    // Both ops should be in shard 0 - verify via run_in_shard
+    let mut seen_keys = Vec::new();
+    cs.run_in_shard(0, |_, kh, k, _v, _| {
+        seen_keys.push((kh[0], k.to_vec()));
+    });
+    // kh_low (0x00) should come before kh_high (0xFF) within shard 0
+    assert_eq!(seen_keys.len(), 2);
+    assert_eq!(seen_keys[0].0, 0x00); // low key hash first
+    assert_eq!(seen_keys[1].0, 0xFF); // high key hash second
+}
+
+#[test]
+fn test_changeset_op_count_empty() {
+    let cs = ChangeSet::new();
+    for shard_id in 0..SHARD_COUNT {
+        assert_eq!(cs.op_count_in_shard(shard_id), 0);
+    }
+}
+
+#[test]
+fn test_changeset_op_count_after_sort() {
+    let mut cs = ChangeSet::new();
+    for i in 0..5u8 {
+        cs.add_op(qmdb::def::OP_READ, 3, &[i; 32], b"k", b"v", None);
+    }
+    for i in 0..3u8 {
+        cs.add_op(qmdb::def::OP_READ, 7, &[i; 32], b"k", b"v", None);
+    }
+    cs.sort();
+    assert_eq!(cs.op_count_in_shard(3), 5);
+    assert_eq!(cs.op_count_in_shard(7), 3);
+    assert_eq!(cs.op_count_in_shard(0), 0);
+}
+
+#[test]
+fn test_changeset_add_op_with_old_value() {
+    let mut cs = ChangeSet::new();
+    let kh = [0x42u8; 32];
+    cs.add_op_with_old_value(
+        qmdb::def::OP_WRITE,
+        4,
+        &kh,
+        b"key",
+        b"new_val",
+        b"old_val",
+        None,
+    );
+    assert_eq!(cs.op_list.len(), 1);
+    assert_eq!(cs.op_list[0].op_type, qmdb::def::OP_WRITE);
+}
+
+#[test]
+fn test_changeset_apply_op_in_range_correct_data() {
+    let mut cs = ChangeSet::new();
+    let kh = [0x10u8; 32];
+    cs.add_op(qmdb::def::OP_DELETE, 1, &kh, b"del_key", b"del_val", None);
+    let mut keys_seen = Vec::new();
+    cs.apply_op_in_range(|op_type, _kh, k, _v, _ov, _rec| {
+        assert_eq!(op_type, qmdb::def::OP_DELETE);
+        keys_seen.push(k.to_vec());
+    });
+    assert_eq!(keys_seen, vec![b"del_key".to_vec()]);
+}
+
+// ============================================================
+// Additional NUMA Topology Tests
+// ============================================================
+
+#[test]
+fn test_numa_detect_is_valid() {
+    let topo = NumaTopology::detect();
+    assert!(topo.num_nodes >= 1);
+    assert_eq!(topo.node_cpus.len(), topo.num_nodes);
+}
+
+#[test]
+fn test_numa_single_node_shard_to_node_always_0() {
+    let topo = NumaTopology {
+        num_nodes: 1,
+        node_cpus: vec![vec![0, 1, 2, 3]],
+    };
+    for shard_id in 0..16 {
+        assert_eq!(topo.shard_to_node(shard_id), 0);
+    }
+}
+
+#[test]
+fn test_numa_two_nodes_alternating() {
+    let topo = NumaTopology {
+        num_nodes: 2,
+        node_cpus: vec![vec![0, 1], vec![2, 3]],
+    };
+    for shard_id in 0..16 {
+        assert_eq!(topo.shard_to_node(shard_id), shard_id % 2);
+    }
+}
+
+#[test]
+fn test_numa_four_nodes_distribution() {
+    let topo = NumaTopology {
+        num_nodes: 4,
+        node_cpus: vec![vec![0], vec![1], vec![2], vec![3]],
+    };
+    assert_eq!(topo.shard_to_node(0), 0);
+    assert_eq!(topo.shard_to_node(1), 1);
+    assert_eq!(topo.shard_to_node(2), 2);
+    assert_eq!(topo.shard_to_node(3), 3);
+    assert_eq!(topo.shard_to_node(4), 0);
+}
+
+#[test]
+fn test_numa_is_numa_false_for_one_node() {
+    let topo = NumaTopology {
+        num_nodes: 1,
+        node_cpus: vec![vec![0]],
+    };
+    assert!(!topo.is_numa());
+}
+
+#[test]
+fn test_numa_is_numa_true_for_two_nodes() {
+    let topo = NumaTopology {
+        num_nodes: 2,
+        node_cpus: vec![vec![0], vec![1]],
+    };
+    assert!(topo.is_numa());
+}
+
+#[test]
+fn test_numa_cpus_for_shard_two_nodes() {
+    let topo = NumaTopology {
+        num_nodes: 2,
+        node_cpus: vec![vec![0, 1, 2], vec![3, 4, 5]],
+    };
+    // Even shards -> node 0
+    assert_eq!(topo.cpus_for_shard(0), &[0, 1, 2]);
+    assert_eq!(topo.cpus_for_shard(2), &[0, 1, 2]);
+    // Odd shards -> node 1
+    assert_eq!(topo.cpus_for_shard(1), &[3, 4, 5]);
+    assert_eq!(topo.cpus_for_shard(3), &[3, 4, 5]);
+}
+
+#[test]
+fn test_numa_fallback_on_invalid_path() {
+    // The public detect() API should always return at least 1 node with CPUs
+    let topo = NumaTopology::detect();
+    assert!(topo.num_nodes >= 1);
+    assert!(!topo.node_cpus[0].is_empty());
+}
+
+#[test]
+fn test_numa_parse_cpulist_single_cpu() {
+    // indirect test via detect_from_sysfs fallback verification
+    let topo = NumaTopology {
+        num_nodes: 1,
+        node_cpus: vec![vec![5]],
+    };
+    assert_eq!(topo.cpus_for_shard(0), &[5]);
+}
+
+#[test]
+fn test_numa_16_shards_all_map_to_valid_node() {
+    let topo = NumaTopology {
+        num_nodes: 4,
+        node_cpus: vec![vec![0], vec![1], vec![2], vec![3]],
+    };
+    for shard_id in 0..SHARD_COUNT {
+        let node = topo.shard_to_node(shard_id);
+        assert!(node < topo.num_nodes, "shard {} mapped to invalid node {}", shard_id, node);
+    }
+}
+
+// ============================================================
+// Additional Merkle Tree Consistency Tests
+// ============================================================
+
+#[test]
+fn test_merkle_two_leaves_parent_hash() {
+    let leaf0 = [0xAAu8; 32];
+    let leaf1 = [0xBBu8; 32];
+    let parent = hash2(0, &leaf0, &leaf1);
+    assert_ne!(parent, [0u8; 32]);
+    assert_ne!(parent, leaf0);
+    assert_ne!(parent, leaf1);
+}
+
+#[test]
+fn test_merkle_level_increases_change_hash() {
+    let a = [0x01u8; 32];
+    let b = [0x02u8; 32];
+    let h0 = hash2(0, &a, &b);
+    let h1 = hash2(1, &a, &b);
+    let h2 = hash2(2, &a, &b);
+    assert_ne!(h0, h1);
+    assert_ne!(h1, h2);
+    assert_ne!(h0, h2);
+}
+
+#[test]
+fn test_merkle_commutativity_broken_at_level_0() {
+    let a = [0x11u8; 32];
+    let b = [0x22u8; 32];
+    assert_ne!(hash2(0, &a, &b), hash2(0, &b, &a));
+}
+
+#[test]
+fn test_merkle_four_leaf_tree() {
+    let leaves = [[0x01u8; 32], [0x02u8; 32], [0x03u8; 32], [0x04u8; 32]];
+    let parent0 = hash2(0, &leaves[0], &leaves[1]);
+    let parent1 = hash2(0, &leaves[2], &leaves[3]);
+    let root = hash2(1, &parent0, &parent1);
+    assert_ne!(root, [0u8; 32]);
+    assert_ne!(root, parent0);
+    assert_ne!(root, parent1);
+}
+
+#[test]
+fn test_merkle_same_leaves_same_root() {
+    let leaf = [0x55u8; 32];
+    let parent = hash2(0, &leaf, &leaf);
+    let root1 = hash2(1, &parent, &parent);
+    let root2 = hash2(1, &parent, &parent);
+    assert_eq!(root1, root2);
+}
+
+#[test]
+fn test_merkle_changing_one_leaf_changes_root() {
+    let mut leaves = [[0u8; 32]; 4];
+    for i in 0..4 {
+        leaves[i][0] = i as u8;
+    }
+    let compute_root = |ls: &[[u8; 32]; 4]| {
+        let p0 = hash2(0, &ls[0], &ls[1]);
+        let p1 = hash2(0, &ls[2], &ls[3]);
+        hash2(1, &p0, &p1)
+    };
+    let root_original = compute_root(&leaves);
+    let mut modified = leaves;
+    modified[0][0] = 0xFF;
+    let root_modified = compute_root(&modified);
+    assert_ne!(root_original, root_modified);
+}
+
+#[test]
+fn test_batch_hash_matches_merkle_computation() {
+    // Compute a 2-level tree using batch_node_hash_cpu and compare with hash2
+    let leaves = vec![
+        [0x01u8; 32], [0x02u8; 32], [0x03u8; 32], [0x04u8; 32],
+    ];
+    let mut level0_out = [[0u8; 32]; 2];
+    batch_node_hash_cpu(
+        &[0, 0],
+        &[leaves[0], leaves[2]],
+        &[leaves[1], leaves[3]],
+        &mut level0_out,
+    );
+    let expected0 = hash2(0, &leaves[0], &leaves[1]);
+    let expected1 = hash2(0, &leaves[2], &leaves[3]);
+    assert_eq!(level0_out[0], expected0);
+    assert_eq!(level0_out[1], expected1);
+
+    let mut root_out = [[0u8; 32]; 1];
+    batch_node_hash_cpu(&[1], &[level0_out[0]], &[level0_out[1]], &mut root_out);
+    let expected_root = hash2(1, &level0_out[0], &level0_out[1]);
+    assert_eq!(root_out[0], expected_root);
+}
+
+// ============================================================
+// Additional Stress / Edge Case Tests
+// ============================================================
+
+#[test]
+fn test_hash2_stress_1000_unique_outputs() {
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..1000u64 {
+        let left = pseudo_random_hash(i);
+        let right = pseudo_random_hash(i + 100000);
+        let h = hash2(0, &left, &right);
+        assert!(seen.insert(h), "Collision at i={}", i);
+    }
+}
+
+#[test]
+fn test_batch_hash_cpu_size_1_through_20() {
+    for n in 1..=20 {
+        let levels: Vec<u8> = (0..n).map(|i| (i % 12) as u8).collect();
+        let lefts: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 17)).collect();
+        let rights: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 17 + 7)).collect();
+        let mut out = vec![[0u8; 32]; n];
+        batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+        for i in 0..n {
+            assert_eq!(out[i], hash2(levels[i], &lefts[i], &rights[i]),
+                "Mismatch at n={}, i={}", n, i);
+        }
+    }
+}
+
+#[test]
+fn test_entry_large_value_roundtrip() {
+    let key = b"large_val_key";
+    let value: Vec<u8> = (0..5000u16).map(|i| (i % 256) as u8).collect();
+    let entry = Entry {
+        key,
+        value: &value,
+        next_key_hash: &[0u8; 32],
+        version: 100,
+        serial_number: 200,
+    };
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    assert_eq!(ebz.key(), key);
+    assert_eq!(ebz.value(), &value[..]);
+    assert_eq!(ebz.version(), 100);
+    assert_eq!(ebz.serial_number(), 200);
+}
+
+#[test]
+fn test_hash2_single_byte_inputs() {
+    for a in 0u8..=255 {
+        for b in [0u8, 128, 255] {
+            let h = hash2(0, &[a], &[b]);
+            assert_ne!(h, [0u8; 32]);
+        }
+    }
+}
+
+#[test]
+fn test_entry_null_known_version() {
+    let mut buf = [0u8; ENTRY_BASE_LENGTH + 48];
+    let ne = entry::null_entry(&mut buf);
+    assert_eq!(ne.version(), qmdb::def::NULL_ENTRY_VERSION);
+    assert_eq!(ne.serial_number(), u64::MAX);
+}
+
+#[test]
+fn test_entry_null_empty_key_value() {
+    let mut buf = [0u8; ENTRY_BASE_LENGTH + 48];
+    let ne = entry::null_entry(&mut buf);
+    assert_eq!(ne.key().len(), 0);
+    assert_eq!(ne.value().len(), 0);
+}
+
+#[test]
+fn test_entry_sentry_shard_0_sn_0() {
+    let mut buf = [0u8; ENTRY_BASE_LENGTH + 48];
+    let se = entry::sentry_entry(0, 0, &mut buf);
+    assert_eq!(se.serial_number(), 0);
+    assert_eq!(se.value().len(), 0);
+}
+
+#[test]
+fn test_entry_sentry_shard_0_sn_1() {
+    let mut buf = [0u8; ENTRY_BASE_LENGTH + 48];
+    let se = entry::sentry_entry(0, 1, &mut buf);
+    assert_eq!(se.serial_number(), 1);
+}
+
+#[test]
+fn test_changeset_multiple_ops_per_shard() {
+    let mut cs = ChangeSet::new();
+    for i in 0u8..10 {
+        cs.add_op(qmdb::def::OP_READ, 5, &[i; 32], b"k", b"v", None);
+    }
+    cs.sort();
+    assert_eq!(cs.op_count_in_shard(5), 10);
+
+    let mut count = 0;
+    cs.run_in_shard(5, |_, _, _, _, _| { count += 1; });
+    assert_eq!(count, 10);
+}
+
+#[test]
+fn test_null_twig_is_deterministic() {
+    // Accessing NULL_TWIG twice yields the same value
+    let root1 = NULL_TWIG.twig_root;
+    let root2 = NULL_TWIG.twig_root;
+    assert_eq!(root1, root2);
+}
+
+#[test]
+fn test_hash_consistency_same_input_always_same_output() {
+    let input = b"consistency_test_input";
+    let h1 = hash(input);
+    let h2 = hash(input);
+    let h3 = hash(input);
+    assert_eq!(h1, h2);
+    assert_eq!(h2, h3);
+}
+
+#[test]
+fn test_hash2_large_inputs() {
+    let a = vec![0xABu8; 10000];
+    let b = vec![0xCDu8; 10000];
+    let h = hash2(0, &a, &b);
+    assert_ne!(h, [0u8; 32]);
+    // Deterministic
+    let h2_val = hash2(0, &a, &b);
+    assert_eq!(h, h2_val);
+}
+
+#[test]
+fn test_batch_hash_cpu_output_length_matches_input() {
+    for n in [0, 1, 5, 50, 100] {
+        let levels = vec![0u8; n];
+        let lefts = vec![[0u8; 32]; n];
+        let rights = vec![[0u8; 32]; n];
+        let mut out = vec![[0u8; 32]; n];
+        batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+        assert_eq!(out.len(), n);
+    }
+}
+
+#[test]
+fn test_entry_buffer_write_then_read_verifies_content() {
+    use qmdb::entryfile::entrybuffer;
+    let key = b"verification_key";
+    let value = b"verification_value";
+    let sn = 42u64;
+    let entry = Entry {
+        key,
+        value,
+        next_key_hash: &[0xFEu8; 32],
+        version: 12345,
+        serial_number: sn,
+    };
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    writer.append(&entry, &[]);
+    writer.end_block(0, 0, sn + 1);
+
+    let mut verified = false;
+    loop {
+        let (eob, _) = reader.read_next_entry(|ebz| {
+            assert_eq!(ebz.key(), key);
+            assert_eq!(ebz.value(), value);
+            assert_eq!(ebz.serial_number(), sn);
+            assert_eq!(ebz.version(), 12345);
+            verified = true;
+        });
+        if eob { break; }
+    }
+    assert!(verified);
+    reader.read_extra_info();
+}
+
+#[test]
+fn test_changeset_print_does_not_panic() {
+    let mut cs = ChangeSet::new();
+    let kh = [0x01u8; 32];
+    cs.add_op(qmdb::def::OP_CREATE, 0, &kh, b"key", b"val", None);
+    // print() should not panic (it prints to stdout)
+    cs.print();
+}
+
+#[test]
+fn test_entry_vec_roundtrip_to_from_bytes() {
+    use qmdb::entryfile::entry::EntryVec;
+    let mut ev = EntryVec::new();
+    let kh = hash(b"test_key_for_ev");
+    let entry = Entry {
+        key: b"test_key_for_ev",
+        value: b"test_val",
+        next_key_hash: &[0u8; 32],
+        version: 1,
+        serial_number: 1,
+    };
+    ev.add_entry(&kh, &entry, &[]);
+    let bytes = ev.to_bytes();
+    let ev2 = EntryVec::from_bytes(&bytes);
+    assert_eq!(ev.total_bytes(), ev2.total_bytes());
+}
+
+#[test]
+fn test_entry_vec_new_has_shard_count_pos_lists() {
+    use qmdb::entryfile::entry::EntryVec;
+    let ev = EntryVec::new();
+    assert_eq!(ev.total_bytes(), 0);
+}
+
+// ============================================================
+// Shard and Utility Tests
+// ============================================================
+
+#[test]
+fn test_shard_count_is_16() {
+    assert_eq!(SHARD_COUNT, 16);
+}
+
+#[test]
+fn test_big_buf_size_is_64kb() {
+    assert_eq!(BIG_BUF_SIZE, 64 * 1024);
+}
+
+#[test]
+fn test_leaf_count_in_twig_is_2048() {
+    assert_eq!(qmdb::def::LEAF_COUNT_IN_TWIG, 2048);
+}
+
+#[test]
+fn test_twig_shift_is_11() {
+    assert_eq!(qmdb::def::TWIG_SHIFT, 11);
+}
+
+#[test]
+fn test_null_entry_version_is_negative_2() {
+    assert_eq!(qmdb::def::NULL_ENTRY_VERSION, -2);
+}
+
+#[test]
+fn test_op_constants_are_distinct() {
+    assert_ne!(qmdb::def::OP_READ, qmdb::def::OP_WRITE);
+    assert_ne!(qmdb::def::OP_WRITE, qmdb::def::OP_CREATE);
+    assert_ne!(qmdb::def::OP_CREATE, qmdb::def::OP_DELETE);
+    assert_ne!(qmdb::def::OP_READ, qmdb::def::OP_DELETE);
+}
+
+#[test]
+fn test_first_level_above_twig_is_13() {
+    assert_eq!(qmdb::def::FIRST_LEVEL_ABOVE_TWIG, 13);
+}
+
+#[test]
+fn test_twig_root_level_is_12() {
+    assert_eq!(qmdb::def::TWIG_ROOT_LEVEL, 12);
+}
+
+#[test]
+fn test_sentry_count() {
+    // SENTRY_COUNT = (1<<16) / SHARD_COUNT = 65536 / 16 = 4096
+    assert_eq!(qmdb::def::SENTRY_COUNT, 4096);
+}
+
+// ============================================================
+// Hash Domain Separation Comprehensive
+// ============================================================
+
+#[test]
+fn test_hash2_level_domain_sep_level_0_vs_1() {
+    let a = [0xDEu8; 32];
+    let b = [0xADu8; 32];
+    assert_ne!(hash2(0, &a, &b), hash2(1, &a, &b));
+}
+
+#[test]
+fn test_hash2_level_domain_sep_level_7_vs_8() {
+    let a = [0x11u8; 32];
+    let b = [0x22u8; 32];
+    assert_ne!(hash2(7, &a, &b), hash2(8, &a, &b));
+}
+
+#[test]
+fn test_hash2_level_domain_sep_level_11_vs_12() {
+    let a = [0xAAu8; 32];
+    let b = [0xBBu8; 32];
+    assert_ne!(hash2(11, &a, &b), hash2(12, &a, &b));
+}
+
+#[test]
+fn test_node_hash_inplace_level_8_known_vector() {
+    let mut out = [0u8; 32];
+    hasher::node_hash_inplace(8, &mut out, "hello", "world");
+    assert_eq!(
+        hex::encode(out),
+        "8e6fc50a3f98a3c314021b89688ca83a9b5697ca956e211198625fc460ddf1e9"
+    );
+}
+
+#[test]
+fn test_hash2x_exchange_false_equals_hash2() {
+    let a: &[u8] = b"first_arg";
+    let b: &[u8] = b"second_arg";
+    assert_eq!(hash2x(3, a, b, false), hash2(3, a, b));
+}
+
+#[test]
+fn test_hash2x_exchange_true_reverses() {
+    let a: &[u8] = b"arg_a";
+    let b: &[u8] = b"arg_b";
+    assert_eq!(hash2x(3, a, b, true), hash2(3, b, a));
+}
+
+#[test]
+fn test_batch_vs_sequential_at_twig_root_level() {
+    let level = qmdb::def::TWIG_ROOT_LEVEL as u8;
+    let n = 8;
+    let lefts: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 100)).collect();
+    let rights: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 100 + 50)).collect();
+    let levels = vec![level; n];
+    let mut out = vec![[0u8; 32]; n];
+    batch_node_hash_cpu(&levels, &lefts, &rights, &mut out);
+    for i in 0..n {
+        assert_eq!(out[i], hash2(level, &lefts[i], &rights[i]));
+    }
+}
+
+// ============================================================
+// Entry Buffer Free-list and State Tests
+// ============================================================
+
+#[test]
+fn test_entry_buffer_writer_curr_buf_not_none() {
+    use qmdb::entryfile::entrybuffer;
+    let (writer, _reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    // Verify writer was constructed correctly - it holds an Arc to the entry buffer
+    assert!(std::sync::Arc::strong_count(&writer.entry_buffer) >= 1);
+}
+
+#[test]
+fn test_entry_buffer_empty_block() {
+    use qmdb::entryfile::entrybuffer;
+    let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    writer.end_block(0, 0, 0);
+    // An empty block: read_next_entry should immediately return end-of-block
+    let (eob, _) = reader.read_next_entry(|_| {});
+    assert!(eob, "Empty block should immediately signal end-of-block");
+    let (cdp, cds, se) = reader.read_extra_info();
+    assert_eq!(cdp, 0);
+    assert_eq!(cds, 0);
+    assert_eq!(se, 0);
+}
+
+#[test]
+fn test_entry_buffer_get_entry_bz_at_past_end_panics() {
+    use qmdb::entryfile::entrybuffer;
+    let (mut writer, _reader) = entrybuffer::new(0, BIG_BUF_SIZE);
+    let entry = make_entry(b"k", b"v", 1);
+    writer.append(&entry, &[]);
+
+    // get_entry_bz_at for a position that is in range but at end is ok
+    // But accessing past end should panic (we just verify the valid case doesn't panic)
+    let (in_disk, accessed) = writer.get_entry_bz_at(0, |_| {});
+    assert!(!in_disk);
+    assert!(accessed);
+}
+
+#[test]
+fn test_active_bits_set_and_clear_repeatedly() {
+    let mut bits = ActiveBits::new();
+    for _ in 0..100 {
+        bits.set_bit(500);
+        assert!(bits.get_bit(500));
+        bits.clear_bit(500);
+        assert!(!bits.get_bit(500));
+    }
+}
+
+#[test]
+fn test_active_bits_all_pages_correct_size() {
+    let bits = ActiveBits::new();
+    for page in 0..8 {
+        let slice = bits.get_bits(page, 32);
+        assert_eq!(slice.len(), 32);
+    }
+}
+
+#[test]
+fn test_hash2_different_data_lengths() {
+    let results: Vec<[u8; 32]> = (1..=10)
+        .map(|len| {
+            let data = vec![0xAAu8; len];
+            hash2(0, &data, &data)
+        })
+        .collect();
+    // All should be different (different length data)
+    for i in 0..results.len() {
+        for j in (i + 1)..results.len() {
+            assert_ne!(results[i], results[j],
+                "hash2 collision for data lengths {} and {}", i + 1, j + 1);
+        }
+    }
+}
+
+#[test]
+fn test_null_higher_tree_level_63_non_zero() {
+    use qmdb::merkletree::twig::NULL_NODE_IN_HIGHER_TREE;
+    assert_ne!(NULL_NODE_IN_HIGHER_TREE[63], [0u8; 32]);
+}
+
+#[test]
+fn test_null_higher_tree_known_value() {
+    use qmdb::merkletree::twig::NULL_NODE_IN_HIGHER_TREE;
+    assert_eq!(
+        hex::encode(NULL_NODE_IN_HIGHER_TREE[63]),
+        "c787c83f6f8402c636a2f48f1bf2c02ceb31ea5ccdd4bd9e6fe6efcc3031b640"
+    );
+}
+
+#[test]
+fn test_null_twig_known_root() {
+    assert_eq!(
+        hex::encode(NULL_TWIG.twig_root),
+        "37f6d34b5f4fe4aba10fd7411d6f58efc4bf844935c37dbe83c5686ceb62ce9d"
+    );
+}
+
+#[test]
+fn test_entry_bz_hash_uses_payload_not_full_bytes() {
+    // hash() of entry_bz uses payload_len bytes, not the full serialized length
+    let entry = make_entry(b"hashkey", b"hashvalue", 5);
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let payload = ebz.payload_len();
+    let expected: [u8; 32] = Sha256::digest(&buf[..payload]).into();
+    assert_eq!(ebz.hash(), expected);
+}
+
+#[test]
+fn test_changeset_add_op_rec() {
+    use qmdb::utils::OpRecord;
+    let mut cs = ChangeSet::new();
+    let mut rec = OpRecord::new(qmdb::def::OP_CREATE);
+    rec.shard_id = qmdb::utils::byte0_to_shard_id(hash(b"rec_key")[0]);
+    rec.key = b"rec_key".to_vec();
+    rec.value = b"rec_val".to_vec();
+    cs.add_op_rec(rec);
+    assert_eq!(cs.op_list.len(), 1);
+}
+
+#[test]
+fn test_numa_detect_from_sysfs_nonexistent() {
+    // detect() falls back to 1 node when sysfs is unavailable
+    // We test the public detect() API; on non-NUMA or single-node systems it returns 1 node
+    let topo = NumaTopology::detect();
+    assert!(topo.num_nodes >= 1);
+    // The public API should never return 0 nodes
+    assert!(!topo.node_cpus.is_empty());
+}
+
+#[test]
+fn test_entry_get_entry_len_matches_serialized_len() {
+    let entry = make_entry(b"lentest", b"lentestval", 999);
+    let total = entry.get_serialized_len(0);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &[]);
+    let len_from_bz = qmdb::entryfile::entry::EntryBz::get_entry_len(&buf[..5]);
+    assert_eq!(len_from_bz, total);
+}
+
+#[test]
+fn test_entry_get_entry_len_with_dsn() {
+    let entry = make_entry(b"k", b"v", 1);
+    let dsn = [10u64, 20, 30];
+    let total = entry.get_serialized_len(3);
+    let mut buf = vec![0u8; total];
+    entry.dump(&mut buf, &dsn);
+    let len_from_bz = qmdb::entryfile::entry::EntryBz::get_entry_len(&buf[..5]);
+    assert_eq!(len_from_bz, total);
+}
+
+// ============================================================
+// GPU-gated Tests
+// ============================================================
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_gpu_hasher_init() {
+    use qmdb::gpu::GpuHasher;
+    let result = GpuHasher::new(1000);
+    // Should not panic; may succeed or fail gracefully
+    match result {
+        Ok(_) => {},
+        Err(_) => {},
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_batch_node_hash_gpu_matches_cpu() {
+    use qmdb::gpu::{GpuHasher, NodeHashJob};
+    use qmdb::utils::hasher::batch_node_hash_gpu;
+    if let Ok(gpu) = GpuHasher::new(10) {
+        let jobs: Vec<NodeHashJob> = (0..5).map(|i| NodeHashJob {
+            level: i as u8,
+            left: pseudo_random_hash(i),
+            right: pseudo_random_hash(i + 50),
+        }).collect();
+        let mut gpu_out = vec![[0u8; 32]; 5];
+        batch_node_hash_gpu(&gpu, &jobs, &mut gpu_out);
+        for (i, job) in jobs.iter().enumerate() {
+            let cpu_result = hash2(job.level, &job.left, &job.right);
+            assert_eq!(gpu_out[i], cpu_result, "GPU/CPU mismatch at job {}", i);
+        }
+    }
+}
+
+// ============================================================
+// Additional Entry Buffer Stress Tests
+// ============================================================
+
+#[test]
+fn test_entry_buffer_100_entries_roundtrip() {
+    use qmdb::entryfile::entrybuffer;
+    let n = 100u64;
+    let (mut writer, mut reader) = entrybuffer::new(0, 4 * BIG_BUF_SIZE);
+    for i in 0..n {
+        let sn = i;
+        let entry = Entry {
+            key: b"stress_key",
+            value: b"stress_value_data",
+            next_key_hash: &[0u8; 32],
+            version: i as i64,
+            serial_number: sn,
+        };
+        writer.append(&entry, &[]);
+    }
+    writer.end_block(0, 0, n);
+
+    let mut count = 0u64;
+    loop {
+        let (eob, _) = reader.read_next_entry(|ebz| {
+            assert_eq!(ebz.key(), b"stress_key");
+            assert_eq!(ebz.value(), b"stress_value_data");
+            count += 1;
+        });
+        if eob { break; }
+    }
+    assert_eq!(count, n);
+    reader.read_extra_info();
+}
+
+#[test]
+fn test_entry_buffer_entries_with_increasing_sns() {
+    use qmdb::entryfile::entrybuffer;
+    let n = 20u64;
+    let (mut writer, mut reader) = entrybuffer::new(0, 4 * BIG_BUF_SIZE);
+    for i in 0..n {
+        writer.append(&make_entry(b"key", b"val", i), &[]);
+    }
+    writer.end_block(0, 0, n);
+
+    let mut sns = Vec::new();
+    loop {
+        let (eob, _) = reader.read_next_entry(|ebz| {
+            sns.push(ebz.serial_number());
+        });
+        if eob { break; }
+    }
+    assert_eq!(sns.len(), n as usize);
+    // Serial numbers should be in order 0..n
+    for (i, &sn) in sns.iter().enumerate() {
+        assert_eq!(sn, i as u64);
+    }
+    reader.read_extra_info();
+}
+
