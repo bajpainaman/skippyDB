@@ -1,373 +1,619 @@
-## QMDB's internal architecture
+# KyumDB Internal Architecture
 
-### Introduction to packages of qmdb
+This document covers the internal architecture of KyumDB — the data structures, pipeline stages, file formats, threading model, and recovery process.
 
-Here we introduce the data structures defined in the qmdb repo.
+For the high-level concepts and usage guide, see the [README](../README.md).
+For GPU acceleration details, see [gpu-acceleration.md](gpu-acceleration.md).
 
-### The overall architecture
+---
 
-First we summerize the files in qmdb:
+## Table of Contents
 
-- hpfile.rs: HPFile is the base class of EntryFile and TwigFile.
-- entryfile.rs: The EntryFile contains the leaves (i.e. entries) of the Twig Merkle Tree.
-- twigfile.rs: The TwigFile contains the internal Merkle nodes of twigs.
-- twig.rs: An in-memory representation of twigs.
-- entry.rs: An in-memory representation of entries.
-- tree.rs: Tree contains all the in-memory and in-SSD parts of the Twig Merkle Tree.
-- indexer: An in-memory B-Tree to map keys to offsets of entries in entryfile.
-- metadb.rs: MetaDB contains meta information about the Twig Merkle Tree.
-- recover.rs: Recover the in-memory parts of the Twig Merkle Tree from in-SSD EntryFile and meta information.
-- entrycache.rs: EntryCache acts as a disk cache, mapping entries' offsets-in-file to their contents. The client and prefetcher fills it such that updater can get the entries from memory, instead of from SSD.
-- prefetcher.rs: It fills EntryCache with the entries which will be updated because of the deletion and creation of KV-paris.
-- updater.rs: It updates btree according to the client's request and send change requests to flusher through EntryBuffer.
-- entrybuffer.rs: It is a fifo of entries. Each entry also acts as a request to the flusher.
-- flusher.rs: It gets requests from EntryBuffer and writes the in-memory and in-SSD parts of the Twig Merkle Tree. It also updates MetaDB.
+- [System Overview](#system-overview)
+- [Data Structures](#data-structures)
+  - [Entry](#entry)
+  - [Twig](#twig)
+  - [Tree](#tree)
+  - [UpperTree](#uppertree)
+  - [EdgeNodes](#edgenodes)
+  - [ActiveBits](#activebits)
+- [File Layer](#file-layer)
+  - [HPFile (Head-Prunable File)](#hpfile-head-prunable-file)
+  - [EntryFile](#entryfile)
+  - [TwigFile](#twigfile)
+  - [MetaDB](#metadb)
+- [Indexer](#indexer)
+  - [InMemIndexer](#inmemindexer)
+  - [HybridIndexer](#hybridindexer)
+- [Pipeline Architecture](#pipeline-architecture)
+  - [Prefetcher](#prefetcher)
+  - [Updater](#updater)
+  - [Flusher](#flusher)
+  - [Compactor](#compactor)
+- [TaskHub and Block Processing](#taskhub-and-block-processing)
+- [Proof Generation](#proof-generation)
+- [Recovery](#recovery)
+- [Threading Model](#threading-model)
+- [Sharding](#sharding)
 
-The core of qmdb is the Prefetcher-Updater-Flusher pipeline, which is shown below:
+---
 
-<img src="figures/ADS_9.jpg" width="250">
-
-The external client sends tasks to the Prefetcher through a task fifo. A task contains several operations to add/delete/update/create KV-pairs. Usally an EVM transaction is modeled as a task.
-
-To update a KV-pair, the external client should fill the old entry into the EntryCache. To delete and create a KV-pair, the prefetcher should fill the old previous entry into the EntryCache, because its `NextKeyHash` field would be updated.
-
-When a new block starts, the external client must send a new EntryCache together with the first task in the block, such that the prefetcher can write to it and the updater can read from it.
-
-The prefecher deques a task from the task fifo, handles the deletion and creation operations in it, and then enques the task into another task fifo, which goes to the updater.
-
-The updater deques a task from the task fifo, handles the updating, deletion and creation operations in it:
-
-- Update
-  1. read the old entry out and invalidate it
-  2. change the entry's `Value`, `LastHeight` and `Height`, and recreate it as a new entry.
-- Delete
-  1. invalidate the old entry
-  2. read the old entry's previous neighbor out and invalidate it
-  3. change the entry's `NextKeyHash`, and recreate it as a new entry
-- Create
-  1. create the new entry
-  2. read out the previous neighbor entry whose `NextKeyHash` must be changed because of the new entry, and invalidate it.
-  3. change the entry's `NextKeyHash`, and recreate it as a new entry
-
-The updater directly changes btree but it does not directly changes the Twig Merkle Tree. Instead, it sends change request to the updater through EntryBuffer.
-
-The flusher get requests from EntryBuffer and do the following jobs:
-
-- Job-1: Append new contents to EntryFile and TwigFile
-- Job-2: Clear some ActiveBits to invalidate old entries
-- Job-3: Calculate the roots of changed/added twigs
-- Job-4: Evict the twigs which are no longer active
-- Job-5: Flush EntryFile and TwigFile to SSD
-- Job-6: Calcuate the Twig Merkle Tree's root using the twig roots as inputs, which may get changed by Job-3
-- Job-7: Prune old twigs that are no longer needed
-- Job-8: Update MetaDB
-
-### Head-Prunable File
-
-<img src="figures/hpfile.png"  width="950" />
-
-See hpfile.rs
-
-Normal files can not be pruned(truncated) from the beginning to some middle point. HPFile use a sequence of small files to simulate one big file. Thus, pruning from the beginning is to delete the first several small files.
-
-A HPFile can only be read and appended. Any byteslice which was written to it is immutable.
-
-You can use `Append` to append a new byteslice into a HPFile, and `Append` will return the start position of this byteslice. Later you can pass this start position to `ReadAt` and read this byteslice out. The position passed to `ReadAt` must be the beginning of a byteslice, instead of its middle.
-
-A HPFile can also be truncated: discarding the content from the given position to the end of the file. All the byteslices written to a HPFile during a block should be taken as one whole atomic operation: all of them exist or none of them exists. If a block is half-executed because of machine crash (some of the byteslices are written and the others are not), then the written slices should be truncated away.
-
-### Entry File
-
-See entryfile.rs
-
-It uses HPFile to store entries, i.e., the leaves of the data tree. The entries are serialized into byteslices in such a sequence:
-
-1. 1-Byte Key Length
-2. 3-Byte Value Length
-3. 1-Byte length of deactived serial number list
-4. Variable-length Key
-5. Variable-length Value
-6. Padding zero bytes (to ensure an entry's total length is integral multiple of 8)
-7. 32-Byte NextKeyHash
-8. 8-Byte Height (little endian)
-9. 8-Byte LastHeight (little endian)
-10. 8-Byte SerialNumber (little endian)
-11. The deactived serial number list: a list of 8-byte integers (little endian)
-
-By adding list of deactived serial numbers into entries, we can also use an entry file as a log file. If all the information in memory is lost, we can re-scan the entry file from beginning to end to rebuild all the state.
-
-An entry's hash id is sha256 of its serialized bytes, which means the list of deactived serial numbers is also proven by the merkle tree. If you receive an entry file from an untrusted peer, you can verify its entries with the merkle tree.
+## System Overview
 
 ```
-
-
-
-
-
-
-
-
+┌──────────────────────────────────────────────────────────────────────┐
+│                          Client (e.g., EVM)                          │
+│                                                                      │
+│  Creates ChangeSets ──▶ Wraps in Tasks ──▶ Submits via start_block  │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │
+                    ┌────────────▼────────────┐
+                    │       TaskHub           │
+                    │  (double-buffered:      │
+                    │   height H, height H+1) │
+                    └────────────┬────────────┘
+                                 │
+        ┌────────────────────────▼────────────────────────┐
+        │                Pipeline (per shard × 16)         │
+        │                                                  │
+        │  ┌──────────┐   ┌──────────┐   ┌──────────────┐ │
+        │  │Prefetcher│──▶│ Updater  │──▶│   Flusher    │ │
+        │  │          │   │          │   │              │ │
+        │  │Fills the │   │Updates   │   │Jobs 1-8:    │ │
+        │  │EntryCache│   │B-tree    │   │Append, hash,│ │
+        │  │for D/C   │   │index,    │   │evict, flush,│ │
+        │  │operations│   │sends new │   │prune, meta  │ │
+        │  │          │   │entries   │   │              │ │
+        │  └──────────┘   │via       │   │Optional GPU │ │
+        │                 │EntryBuf  │   │acceleration │ │
+        │                 └──────────┘   └──────────────┘ │
+        │                                                  │
+        │  ┌─────────┐  ┌──────────┐  ┌─────────────────┐ │
+        │  │Compactor │  │EntryBuf  │  │  EntryCache     │ │
+        │  │(bg GC)   │  │(FIFO)    │  │  (read cache)   │ │
+        │  └─────────┘  └──────────┘  └─────────────────┘ │
+        └──────────────────────────────────────────────────┘
+                                 │
+        ┌────────────────────────▼────────────────────────┐
+        │              Storage Layer (per shard × 16)      │
+        │                                                  │
+        │  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
+        │  │EntryFile │  │ TwigFile │  │   Indexer     │   │
+        │  │(HPFile)  │  │(HPFile)  │  │  (B-tree)     │   │
+        │  └──────────┘  └──────────┘  └──────────────┘   │
+        │                                                  │
+        │              ┌──────────────────┐                │
+        │              │     MetaDB       │                │
+        │              │   (RocksDB)      │                │
+        │              └──────────────────┘                │
+        └──────────────────────────────────────────────────┘
 ```
 
-### The Twig File
+---
 
-See twigfile.rs
+## Data Structures
 
-It uses HPFile to store small 2048-leave tree in a twig. When someone queries for the proof of an entry, we can use this file to read the internal hash nodes in the twig.
+### Entry
 
-Each hash node occupies 32 bytes. There are 4095 nodes in the 2048-leave small Merkle tree, and they are numbered in such way:
+**File**: [`qmdb/src/entryfile/entry.rs`](../qmdb/src/entryfile/entry.rs)
 
-```text
-                               1                                        
-                              /  \                                       
-                             /    \                                       
-                            /      \                                       
-                           /        \                                       
-                          /          \                                       
-                         /            \                                       
-                        2              3                                  
-                       / \            / \                                    
-                      /   \          /   \                                    
-                     /     \        /     \                                    
-                    4       5       6      7                             
-                   / \     / \     / \    / \                                    
-                  /   \   /   \   /   \  /   \                                    
-                 8    9  10   11 12  13  14  15
-```
-
-Node 1 is the root, and 2 and 3 is its left child and right child. Generally, node `n` has `2*n` and `2*n+1` as its left child and right child. There is no node numbered as 0. The 2048 leaves in the tree are numbered from 2048~4095.
-
-In the twig Merkle tree file, we also stores the first entry's position of each twig, which is the postion where we can find the first entry of a twig in the entry file. This information occupies 12 bytes: 8 bytes of position and 4 bytes of checksum.
-
-### The Twig Merkle Tree
-
-See tree.rs
-
-This is most important data structures. Youngest twig, active twigs and pruned twigs are all implemented here. Most of the code are related to incrementally modify the Merkle tree by appending new leaves and invalidate old leaves.
-
-#### Major Components
-
-A datatree keeps the following major components:
-
-1. The entry file
-2. The twig file, which stores the left parts of all twigs, except the fresh twig
-3. The left part of the fresh twig
-4. The right parts of all active twigs (the right parts of the inactive twigs are all same and not needed to be kept)
-5. The upper-level nodes whose are ancestors of active twigs
-
-The components 3, 4 and 5 are stored in DRAM and volatile. They will be lost after the program exits, so their state must be rebuilt from components 1 and 2 when the program is restarted.
-
-There are also some minor components, which are temporary sratchpad used during block execution. When a block is fully executed, the contents of these components will be cleared.
-
-#### Buffering the left part of the fresh twig
-
-The left part of a twig is a Merkle tree with 2048 leaves. When a new twig is allocated as the fresh twig, all its leaves are hashes of null entry, whose Key, Value and NextKey are all zero-length byteslices and Height, LastHeight and SerialNum are all -1.
-
-As new entries are append into the fresh twig, more and more leaves are replaced by hashes of non-null entries. And the 2048-leave Merkle tree changes gradually. We record this gradually-changing left part of the fresh twig in the variable `mtree4YoungestTwig`.
-
-After 2048 entries are appended, the left part can not change anymore, so we flush it into the twig file and then allocate a new small Merkle tree as the fresh twig.
-
-#### Evicting twigs and pruning twigs
-
-When a twig's active bits are all zeros, its right part can not change any more. So we can evict it from DRAM to make space for newly-generated twigs.
-
-The aged twigs will undergo the compaction process, during which the valid entries are read out, invalidated and recreated. Compaction ensures we can always make some progress in evicting old twigs.
-
-Pruning twigs is another operation, which is totally different from evicting. Pruning twigs means prune the entries and left parts of old twigs from SSD. The twig file and the entry file are all implemented with head-pruneable files, so they support pruning the records at the head.
-
-#### Upper-level hash nodes
-
-In datatree we use the variable `nodes` to store the upper-level nodes.
-
-The variable `nodes` is just a hashmap, whose values are hash IDs stored in nodes, and keys are tree-positions. How to present the position of a node in a Merkle tree? If a node is the `N`-th node at level `L`, the its tree-position is calculated as an integer `(L<<56)|N`. A node with postion of `(L, N)` has two children: `(L-1, 2*N)` and `(L-1, 2*N+1)`.
-
-A root node is the node whose level is the largest among all the nodes.
-
-#### The null twig and null nodes
-
-QMDB uses a balanced binary Merkle tree whose leave count is $2^N$. If the count of entries is not $2^N$, we just add null entries for padding, concepturally. In the implementation, we do not really add so many null entries for padding. Instead, we just add at most one null twig and at most one null node at each level. In a null twig, all the active bits are zero and all the leaves are null entries. For a null node, all its descendant (downstream) nodes and twigs are null. The null twig and null nodes are pre-computed in the `init()` function.
-
-In the following figure. E is a null twig while F and G are null nodes. We do not keep the grey portion in DRAM and hard disk, because these twigs and nodes are all null. Instead, storing E, F and G in DRAM is enough to providing proof for every valid entry.
-
-<img src="figures/ADS_7.png" width="600">
-
-#### The edge nodes
-
-In the above figure, the first four twigs are pruned to save space of hard disk. If we discard all the orange portion of the Merkle tree, some entries will be impossible to be proven. So we must still keep the nodes A, B, C and D in DRAM. These nodes are called "edge nodes" because they are at the left edge of the remained tree. A node is an edge node if and only if:
-
-1. It is the twigRoot of just-pruned twig, i.e., whose twigID is the largest among all pruned twigs.
-2. It has both pruned-descendants and non-pruned-descendants.
-
-The edge nodes must be saved to MetaDB to keep data consistency.
-
-#### Batch sync
-
-The datatree gets changed because of two kinds of operations: appending new entries and deactivating old entries. If we synchronize the Merkle tree after each operation, the amount of computation would be huge. So we prefer to finish all the appending and deactivating operations in a block and then use batch-mode synchronization to make the Merkle tree consistent.
-
-Synchronization has four steps:
-
-1. When the left part of the fresh twig is ready to be flushed to hard disk, this 2048-leave tree get synchronized. This synchronization can run multiple times during a block's execution.
-2. When a block finishes execution, the left part of the fresh twig get synchronized.
-3. When a block finishes execution, all the right parts of twigs get synchronized to calculate twig root
-4. When step 2 and 3 finish, the upper level nodes get synchronized.
-
-During step 2, 3 and 4, the hash computations of the same level are independent with each other, so we can run them parallelly.
-
-### Rocksdb
-
-See rocks_db.rs
-
-RocksDB is a KV database written in C++. It has a Rust binding.
-
-All the updates generated during one block is kept in one db-batch, to make sure blocks are atomic. If the batch commits, the block commits. If the batch is discarded, it looks as if the block does not execute at all.
-
-### metadb
-
-See metadb.rs
-
-We need to store a bit of meta information when a block finishes its execution. The data size is not large and not performance critical, so we store them in RocksDB.
-
-When the program starts, we should use the information in metadb to recover the other parts of QMDB.
-
-The following data are stored in metadb:
-
-- CurrHeight: the height of the latest executed block
-- TwigMtFileSize: the size of the twig Merkle tree file when the block at CurrHeight commits.
-- EntryFileSize: the size of the entry file when the block at CurrHeight commits.
-- OldestActiveTwigSN: serial number of the oldest active entry, i.e., this SN is the smallest among all the active entries.
-- OldestActiveTwigFilePos: file position of the oldest active entry.
-- LastPrunedTwig: ID of the  just-pruned twig, i.e., this ID is the largest among all pruned twigs.
-- EdgeNodes: the edge nodes returned by `PruneTwigs`.
-- NextSerialNum: the serial number that will be used when creating the next entry.
-
-When QMDB is NOT properly closed, TwigMtFileSize and EntryFileSize may be different from the real file size on disk, because of the last block's partial execution. Before recovering, the twig file and entry file would be truncated to the TwigMtFileSize and EntryFileSize stored in metadb, respectively.
-
-### B-tree
-
-We use B-Tree because it's much more memory-efficient that Red-Black tree and is cache friendly.
-
-It costs a lot of DRAM to use B-Tree to map 256-bit key hashes to 64-bit file offsets. So we just use B-Tree to map 64-bit short key hash to 48-bit file offsets.
-
-The 64-bit short key hashes are just first 8 bytes of sha256 hashes. They are too short to prevent hash conflicts. So the B-Tree is actually a `ordered_multimap`-like data structure. One short key hash can be mapped to multiple file offsets. You must try all of them to figure out which is the correct one. Since hash conflicts is rare enough for 64-bit short hashes, the performance penalty can be ignored.
-
-The 48-bit file offsets must be multiplied by 8 to get the real offsets to access EntryFile. Because the entries are padded to integral multiple of 8 bytes, their offset's lowest three bits are always zeros. The maximum size of EntryFile is `2**51 = 2048 Tera Bytes` when using such a B-tree.
-
-The B-tree is divieded into 65536 shards to support parallel access from client/prefetcher/updater. Each shard maps 48-bit integers to 48-bit integers.
-
-To prevent parallel-programming bugs caused by cross-shard iteration, when creating a Twig Merkle Tree, 63356 sentry entries must be inserted to it. Sentry entries' key hashes are not calculated, instead, they are defined to be `[32]byte{X, Y, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}` where X and Y are two 8-bit integers.
-
-### Timing of the pipeline
-
-The client must gradually send new tasks to the prefetcher through out the time frame of a block interval. The prefetcher/updater/flusher are allowed to finish their job within the time frame of two block intervals, as is shown below:
-
-<img src="figures/ADS_10.jpg" width="600">
-
-Three block intervals (Block N, Block N+1 and Block N+2) are shown in the figure. The prefetcher and the updater work in repeating threads, which means, after they finish the tasks in Block N, they will continue to do the tasks in Block N+1, and they never exit. The flusher is different. It does Job1-5 in repeating threads and does Job6-8 in forked one-time threads. After Job5 is done, the flusher forks new threads to do Job6-8. The new threads exit after Job6-8 are done. We choose such a scheme for better performance because Job6-8 of Block N+1 can be done concurrently with Job1-2 of Block N.
-
-To prevent possible bugs, we add the following interlock requirements:
-
-- Requirement-1: The forked one-time thread for Job6-8 can not overlap. The forked one-time thread of Block N must exit before the flusher fork the one-time thread of Block N+1.
-- Requirement-2: Since Job3 will overwrite the twig roots read by Job6, the Job6 of Block N+1 cannot start before the Job3 of Block N finishes.
-- Requirement-3: The client cannot start to execute Block N+2 (and later Blocks) before Job8 of Block N finishes.
-
-The Requirement-3 ensures that the new data generated by Block N are written to SSD before Block N+2 starts. When the client executes Block N+1, it can only read the data written by Block N and earlier blocks from SSD reliably, and it must read the data written by Block N and Block N+2 from a local cache maintained by itself.
-
-## TaskHub
-
-QMDB and its client (such as exepipe) sync with each through TaskHub. QMDB needs to know how many tasks are in current block. TaskHub holds all the tasks in the recent two blocks.
-
-The exepipe and QMDB are all pipelined. The total latency of a task getting scheduled, executed, writing file is no larger than two block intervals. This situation is possible: at some moment, the task processed by prefetcher is in Block#N+1 and the task processed by updater is in Block#N.
-
-So the data in TaskHub can be divided into two sets: set 0 and set 1. Somehow it is like the "double buffering" scheme. The variable height0 and height1 are the two blocks whose tasks are held in TaskHub. Please note that height0 may be larger or smaller than height1. If height0 or height1 is -1, then set 0 or set 1 is empty, respectively. `start_block` fills an empty set. `end_block` releases (frees) a used set.
-
-When QMDB finishes a block and updates metadb, the block's height will be sent to `end_block_chan`. The QMDB's cliet (such as exepipe) must check `end_block_chan` before calling `start_block` to make sure there is at last one empty set.  
-
-TaskHub's `get_change_sets` function returns change sets, that is set of changes the task has make. In a change set, all the modifications are sorted in a determistic order, which is enforced by the logic in 'ChangeSet'.
-
-## HybridIndexer
-
-HybridIndexer wants to solve the problem of InmemIndexer using too much DRAM. DRAM is veriy expensive.
-
-It puts most of indexing data in SSD, and a bit of data in DRAM, so we call it "hybrid".
-
-It contains four parts:
-
-1. Readonly disk files. It records indexing information (8-byte key and 6-byte entryfile offset) which were recorded before. Some of its data are up-to-date, and some are not.
-2. Cache in DRAM. It records some results which were got after accessing the readonly disk files. As long as the readonly file is valid, the cached results are valid.
-3. Overlay in DRAM. It records the latest add/delete/update operations.
-4. ActiveBits in DRAM. It has the same function as the ActiveBits in UpperTree. However, it is updated by the flusher, instead of the updater.
-
-The out-of-date indexing information in the readonly disk files can not make trouble because:
-
-1. originally existing + now not exsiting: the `del_set` in Overlay will filter them out.
-2. originally adjacent + now not adjacent: if a `prevEntry` is no longer adjacent to an `entry` (because of insertion between them or deletion of `prevEntry`/`entry`), the logic in updater will make `prevEntry` deactived, so `del_set` can filter them out too.
-3. originally not existing + now existing: the `new_kv` in Overlay records them.
-4. originally not adjacent + now adjacent: the `new_kv` in Overlay records them.
-
-To prevent the cache from growing too large, we divide it into small ones. Each small cache only serves one single block. When the block it serves gets old, it will be deleted. So every time we access the HybridIndexer, the block's height must be given, to show the access requests are coming from this block's transactions. The access request coming from RPC do not belong to a transaction in block, so we use -1 as their heights. When HybridIndex gets requests of height -1, it will not read or update the cache.
-
-To prevent Overlay from growing too large, we periodically merge Overlay and the old readonly files to generate new readonly files, and then clear the cache (because the old readonly files are invalid now).
-
-Such a merging task is done by a dedicated merger thread. When the merger thead finds a shard has accumulated enough changes of add/delete/update, it merges this shard.
-
-To avoid conflicts, HybridIndexer has 65536 small units inside. To serve a read/write request, we only lock one unit. Since the read request may also change the unit's cache, we just use Mutex, instead of RwLock.
-
-We cannot asign a readonly file to each unit, because 65536 files are too many. Instead, we let 1024 units share one file. There are 64 files in total and each files is protected by a RwLock. During merging, the file is write-locked, which means the other 1023 units which are sharing this file cannot get a read-lock. To alleviate this problem, we use a big buffer to cache the write data, and only the short period of flushing this buffer needs the file's write-lock.
-
-The readonly files are not designed for persistency. If the program crashes or exits, you must re-build these readonly files after restart the program. Rebuilding the readonly files of one shard needs to first generating their contents in DRAM and then flush them out to files. This process consumes quite a lot of DRAM, so we must rebuild one shard after another to keep the peek DRAM usage low.
-
-The readonly files are implemented using `TempFile`. When no units are referencing a `TempFile`, it will be deleted from disk. Each record in the readonly file is 14 bytes long: 8-byte key and 6-byte file offset. All the records are sorted in ascending order, just like BTree in DRAM. During merging, we do not need to sort again. To make it easier to find a record in file, we keep a 8-byte key for every 256 records in disk.
-
-### Cache Design
-
-The cache is not used to containing some segment of the readonly files. Instead, it contains some results or facts about the readonly files, which are known after accessing the files. These facts are:
-
-- Fact#1: We cannot find a file offset corresponding to a 8-byte key
-- Fact#2: We can find a unique file offset corresponding to a 8-byte key
-- Fact#3: We find the previous key of a 8-byte key Y is X, and we know the corresponding keys of X and Y
-
-The Fact#1 and Fact#2 are used in read/write operations, while Fact#3 can be used in create/delete operations, as well as read/write operations. If we can find multiple file offsets corresponding to a 8-byte key, we just describe it as Fact#3 in the cache, although the previous key X is useless for this scenario.
-
-In fact, when using 80-bit short hash prefix, one key has only one corresponding file offset in more than 99.99999% cases. But the code must support multiple corresponding offsets to be safe.
-
-To analyze the cache's effectiveness, we count the times of cache-hit and cache-miss when the updater accesses it. When exepipe and prefetcher access the cache, we expect it will miss and get filled, so their accesses are marked as warmup=true. The accesses from updater are marked as warmup=false.
-
-### ActiveBits help HybridIndexer
-
-Both compactor and updater use the indexer's `key_exists` function to query whether an entry is active or not. Only active entries can be compacted. InmemIndexer judges this quickly by querying in DRAM whether the entry's file position can be found. But HybridIndexer cannot judge quickly by querying in SSD.
-
-A better solution is to use UpperTree's ActiveBits instead. Considering Rust's ownership check, we cannot reuse the ActiveBits in UpperTree. Instead, we must add another ActiveBits owned by HybridIndexer.
-
-HybridIndexer and InmemIndexer have the same API. Their functions' arguments can meet the needs of both of them. Some arguments are useless for HybridIndexer and some arguments are useless for InmemIndexer. However, all these arguments must be provided.
-
-### Fetch Pages from Readonly Files
-
-Each unit has its own key-offset pairs in readonly files. These pairs are grouped into pages. One page have 32 pairs. When filling information to the cache, we must fetch pages from readonly files and analyze them.
-
-If a page contains two many pairs, it would use too much bandwidth of SSD and reduce the performance. Finally we find 32 is a reasonable value.
-
-How do we know which page to fetch? Just use a first-key list, which contains the first key of each page. Given a key hash, use its byte2~9 to run binary-seach on the first-key list, you'll get the page id to fetch from readonly files.
-
-To further reduce memory usage, we use two different lengths in the first-key list. If `pageid%4==0`, then the key is 8-byte-long (sha256's byte2~9). If `pageid%4!=0`, then the key is 4-byte-long (sha256's byte2~5).
-
-Note that using short hash (sha256's byte0~9) in HybridIndexer will cause hash conflications. The current key hash's key-offset pairs may span multiple pages. The previous key hash's key-offset pairs may also span multiple pages. So we must start from the last page which may contain the pairs for current/previous key hash's pairs, and scan backward until the span range end.
-
-## Get Proof Paths
-
-In flusher, before we spawn a thread for updating UpperTree, we use a channel to collect the requests of `get_proof`. The requests are save to a field in UpperTree and for each request we also read a copy of 256-bit ActiveBits out.
-
-The the UpperTree is taken out from self.tree:
+An Entry is the primitive data unit — one key-value pair at a specific block height.
 
 ```rust
-        let mut upper_tree = UpperTree::empty();
-        mem::swap(&mut self.tree.upper_tree, &mut upper_tree);
-        let upper_tree_sender = self.upper_tree_sender.clone();
+pub struct Entry<'a> {
+    pub key: &'a [u8],           // Variable-length key (max 255 bytes)
+    pub value: &'a [u8],         // Variable-length value (max 16MB)
+    pub next_key_hash: &'a [u8], // 32B: hash of the next key in sorted order
+    pub version: i64,            // Block height when created
+    pub serial_number: u64,      // Global monotonic sequence number
+}
 ```
 
-In the spawned thread, when it finishes updating UpperTree, it will send the tree back:
+**Serialized binary layout**:
+
+```
+Offset  Size    Field
+──────  ────    ─────
+0       1B      key_length (u8)
+1       3B      value_length (u24, little-endian)
+4       1B      deactivated_sn_count (u8)
+5       var     key (key_length bytes)
+5+K     var     value (value_length bytes)
+5+K+V   32B     next_key_hash
+37+K+V  8B      version (i64, little-endian)
+45+K+V  8B      serial_number (u64, little-endian)
+53+K+V  var     deactivated_sn_list (N × 8B, little-endian)
+...     0-7B    padding (to 8-byte alignment)
+...     16B     AES-GCM tag (only with tee_cipher feature)
+```
+
+**EntryBz** wraps a borrowed byte slice and provides zero-copy accessors:
 
 ```rust
-            upper_tree_sender.send(upper_tree).unwrap();
+pub struct EntryBz<'a> {
+    pub bz: &'a [u8],
+}
+
+impl EntryBz {
+    pub fn key(&self) -> &[u8];
+    pub fn value(&self) -> &[u8];
+    pub fn key_hash(&self) -> Hash32;
+    pub fn next_key_hash(&self) -> &[u8];
+    pub fn version(&self) -> i64;
+    pub fn serial_number(&self) -> u64;
+    pub fn hash(&self) -> Hash32;     // SHA256 of payload bytes
+    pub fn dsn_count(&self) -> usize;
+    pub fn dsn_iter(&self) -> DSNIter;
+}
 ```
 
-Before it sends the tree back, we processes the requests save in UpperTree and get the full proof paths, using the 256-bit ActiveBits that were copied before.
+**Special entry types**:
+
+- **Sentry entries**: Boundary markers created during `init_dir()`. 4096 per shard (65536 total). Their key hashes are deterministic 2-byte prefixes, not computed from actual keys. They partition the keyspace into non-overlapping ranges to prevent cross-shard iteration bugs.
+
+- **Null entries**: Placeholder entries with `version = -2`, `serial_number = u64::MAX`. Used to initialize empty twig leaf slots.
+
+**EntryVec**: A batched container holding entries across all shards in contiguous big buffers (64KB chunks). Used for bulk operations like stateless validation.
+
+### Twig
+
+**File**: [`qmdb/src/merkletree/twig.rs`](../qmdb/src/merkletree/twig.rs)
+
+A Twig is a compact sub-tree containing 2048 entries.
+
+```
+              TwigRoot (Level 12)
+             /                    \
+        LeftRoot (L11)        ActiveBitsMTL3 (L10)
+       /                      /                \
+   11-level tree         ABits_MTL2[0]     ABits_MTL2[1]
+   2048 leaves           /       \           /        \
+   (entry hashes)   ABits_L1[0] ABits_L1[1] ABits_L1[2] ABits_L1[3]
+                    ────────────────────────────────────────────────
+                    8 pages × 32B = 256B ActiveBits (2048 bits)
+```
+
+```rust
+pub struct Twig {
+    pub active_bits_mtl1: [Hash32; 4],    // Level 8 hashes
+    pub active_bits_mtl2: [Hash32; 2],    // Level 9 hashes
+    pub active_bits_mtl3: Hash32,         // Level 10 hash
+    pub left_root: Hash32,                // Root of 11-level entry tree
+    pub twig_root: Hash32,                // hash2(11, left_root, active_bits_mtl3)
+}
+```
+
+**TwigMT** (`[Hash32; 4096]`): The 11-level binary tree inside a twig. Nodes are numbered 1-4095:
+- Node 1: root (= `left_root`)
+- Nodes 2, 3: children of root
+- Node N has children 2N and 2N+1
+- Leaves at positions 2048-4095 contain entry hashes
+
+**Global singletons** (computed once at startup):
+- `NULL_MT_FOR_TWIG`: TwigMT with all null entry hashes
+- `NULL_TWIG`: Twig with all-zero active bits
+- `NULL_NODE_IN_HIGHER_TREE[64]`: Null hash at each tree level
+- `NULL_ACTIVE_BITS`: All-zero 256-byte active bits
+
+### Tree
+
+**File**: [`qmdb/src/merkletree/tree.rs`](../qmdb/src/merkletree/tree.rs)
+
+The Tree struct holds the complete Merkle state for one shard.
+
+```rust
+pub struct Tree {
+    pub shard_id: usize,
+    pub entry_file_wr: EntryFileWriter,        // Append-only entry storage
+    pub twig_file_wr: TwigFileWriter,          // Append-only twig storage
+    pub upper_tree: UpperTree,                 // In-DRAM upper levels
+    pub youngest_twig_id: u64,                 // Current accumulation twig
+    pub active_bits_shards: Vec<HashMap<u64, ActiveBits>>,
+    pub mtree_for_youngest_twig: Box<TwigMT>,  // 131KB in-DRAM buffer
+    // ... scratchpad fields for block execution
+}
+```
+
+Key operations:
+- `append_entry()`: Add entry to youngest twig, increment serial number
+- `flush_files()`: Write twig data to SSD
+- `deactivate()`: Clear an entry's active bit, mark for re-hashing
+- `sync_mtree()`: Bottom-up hash synchronization of TwigMT
+- `get_root()`: Compute global Merkle root from upper tree
+
+### UpperTree
+
+The nodes above twig level, stored entirely in DRAM.
+
+```rust
+pub struct UpperTree {
+    pub my_shard_id: usize,
+    // nodes[level - FIRST_LEVEL_ABOVE_TWIG][node_shard] = HashMap<NodePos, Hash32>
+    pub nodes: Vec<Vec<HashMap<NodePos, [u8; 32]>>>,
+    // active_twig_shards[twig_shard] = HashMap<twig_id, Box<Twig>>
+    pub active_twig_shards: Vec<HashMap<u64, Box<twig::Twig>>>,
+}
+```
+
+**NodePos** encodes a node's position as `(level << 56) | nth`:
+```rust
+pub struct NodePos(u64);
+// Level: high 8 bits
+// Nth: low 56 bits
+// Children of (L, N): (L-1, 2N) and (L-1, 2N+1)
+```
+
+Nodes are sharded internally:
+- `NODE_SHARD_COUNT = 4`: Upper tree nodes divided into 4 submaps per level
+- `TWIG_SHARD_COUNT = 4`: Active twigs divided into 4 submaps
+
+### EdgeNodes
+
+When twigs are pruned, "edge nodes" preserve the ability to generate proofs for remaining entries.
+
+```rust
+pub struct EdgeNode {
+    pub pos: NodePos,
+    pub value: [u8; 32],
+}
+```
+
+A node is an edge node if:
+1. It's the twig root of the just-pruned twig (largest pruned twig ID), OR
+2. It has both pruned descendants and non-pruned descendants
+
+Edge nodes are persisted in MetaDB and restored during recovery.
+
+```
+ Pruned    Pruned    Active    Active    Active    (youngest)
+┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐
+│  ░░  │  │  ░░  │  │      │  │      │  │      │  │  ..  │
+└──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘
+   A         B         │         │         │         │
+   └────┬────┘         │         │         │         │
+        C              │         │         │         │
+        └──────┬───────┘         │         │         │
+               D                 │         │         │
+               └────────┬────────┘         │         │
+                        │                  │         │
+                        └──────┬───────────┘         │
+                               │                     │
+                               └──────────┬──────────┘
+                                          │
+                                        Root
+
+Edge nodes: A, B, C, D (preserve proof path for active entries)
+```
+
+### ActiveBits
+
+**File**: [`qmdb/src/merkletree/twig.rs`](../qmdb/src/merkletree/twig.rs)
+
+256 bytes (2048 bits) per twig, one bit per entry:
+
+```rust
+pub struct ActiveBits([u8; 256]);
+
+impl ActiveBits {
+    pub fn set_bit(&mut self, offset: u32);   // Mark entry as active
+    pub fn clear_bit(&mut self, offset: u32); // Mark entry as deactivated
+    pub fn get_bit(&self, offset: u32) -> bool;
+    pub fn get_bits(&self, page_num: usize, page_size: usize) -> &[u8];
+}
+```
+
+ActiveBits are divided into 8 pages of 32 bytes for the right sub-tree of the twig:
+- Pages 0-7 → hashed pairwise → `active_bits_mtl1[0..3]`
+- `active_bits_mtl1[0..3]` → hashed pairwise → `active_bits_mtl2[0..1]`
+- `active_bits_mtl2[0..1]` → hashed → `active_bits_mtl3`
+
+---
+
+## File Layer
+
+### HPFile (Head-Prunable File)
+
+**File**: [`hpfile/src/lib.rs`](../hpfile/src/lib.rs)
+
+Normal files can't be truncated from the beginning. HPFile simulates a single large file using a sequence of fixed-size segments.
+
+```
+Segment 0          Segment 1          Segment 2
+(pruned/deleted)   (current head)     (latest)
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│  XXXXXXXXXX  │   │ data data    │   │ data data    │
+│  XXXXXXXXXX  │   │ data data    │   │ data ...     │
+└──────────────┘   └──────────────┘   └──────────────┘
+ 0-{seg_size}      {seg_size}-{2*seg}  {2*seg}-...
+```
+
+Key properties:
+- **Append-only**: Data written is immutable
+- **Head-prunable**: Delete earliest segments for garbage collection
+- **Tail-truncatable**: Discard partial writes after crash recovery
+- **Configurable segment size**: Default 1GB
+- **Write-buffered**: Collects small writes into buffer-sized flushes
+- **Optional DirectIO**: Bypass OS page cache on Linux (via `io_uring`)
+
+### EntryFile
+
+**File**: [`qmdb/src/entryfile/entryfile.rs`](../qmdb/src/entryfile/entryfile.rs)
+
+Stores serialized entries using HPFile. One EntryFile per shard.
+
+```rust
+pub struct EntryFile {
+    hp: Arc<HPFile>,
+    cipher: Option<Aes256Gcm>,
+}
+
+impl EntryFile {
+    pub fn read_entry(&self, pos: i64, buf: &mut [u8]) -> usize;
+}
+```
+
+The `pos` (file position) returned by `append` is stored in the indexer for later retrieval.
+
+### TwigFile
+
+**File**: [`qmdb/src/merkletree/twigfile.rs`](../qmdb/src/merkletree/twigfile.rs)
+
+Stores the internal Merkle nodes of finalized twigs. One TwigFile per shard. Each twig occupies a fixed-size region:
+- 4095 nodes × 32 bytes = 131,040 bytes for the binary tree
+- 12 bytes for the first entry's position (8B position + 4B checksum)
+- Total: ~128 KB per twig
+
+### MetaDB
+
+**File**: [`qmdb/src/metadb.rs`](../qmdb/src/metadb.rs)
+
+RocksDB-backed storage for metadata that must survive restarts:
+
+| Key | Per-Shard | Description |
+|---|---|---|
+| `CurrHeight` | No | Latest committed block height |
+| `EntryFileSize[i]` | Yes | Entry file size at commit |
+| `TwigFileSize[i]` | Yes | Twig file size at commit |
+| `NextSerialNum[i]` | Yes | Next available serial number |
+| `OldestActiveSN[i]` | Yes | Oldest active entry's serial number |
+| `OldestActiveFilePos[i]` | Yes | Oldest active entry's file position |
+| `YoungestTwigID[i]` | Yes | Latest twig ID |
+| `LastPrunedTwig[i]` | Yes | Most recently pruned twig ID |
+| `EdgeNodes[i]` | Yes | Serialized edge node list |
+| `RootHash[i]` | Yes | Merkle root hash |
+| `ExtraData[height]` | No | User-provided block data (JSON) |
+
+---
+
+## Indexer
+
+### InMemIndexer
+
+**File**: [`qmdb/src/indexer/inmem.rs`](../qmdb/src/indexer/inmem.rs)
+
+Pure in-memory B-tree. Maps 10-byte key hash prefix → file position.
+
+**Design choices**:
+- Uses 64-bit short key hash (first 8 bytes of SHA256) for the B-tree key
+- Uses 48-bit file offset (divided by 8 since entries are 8-byte aligned), supporting up to 2048 TB
+- 65536 shards for parallel access
+- Hash collisions handled by iterating all matching positions
+- Background compaction thread merges and cleans old entries
+
+### HybridIndexer
+
+**File**: [`qmdb/src/indexer/hybrid/`](../qmdb/src/indexer/hybrid/)
+
+SSD-optimized indexer for very large datasets. Four components:
+
+1. **Readonly disk files**: Sorted 14-byte records (8B key + 6B offset)
+2. **Cache in DRAM**: Results from recent file lookups (per-block lifetime)
+3. **Overlay in DRAM**: Latest add/delete/update operations
+4. **ActiveBits in DRAM**: Tracks which disk records are still valid
+
+Records are grouped into 32-record pages. A first-key list enables binary search to locate the correct page.
+
+---
+
+## Pipeline Architecture
+
+### Prefetcher
+
+**File**: [`qmdb/src/uniprefetcher.rs`](../qmdb/src/uniprefetcher.rs) (standard) / [`qmdb/src/dioprefetcher.rs`](../qmdb/src/dioprefetcher.rs) (direct I/O)
+
+Receives tasks from the client. For Delete and Create operations, pre-reads the affected entries into EntryCache so the Updater can access them from memory instead of SSD.
+
+- Uses a thread pool (default 512 threads) for parallel I/O
+- Each shard has its own work queue
+- Forwards processed tasks to the Updater via a channel
+
+### Updater
+
+**File**: [`qmdb/src/updater.rs`](../qmdb/src/updater.rs)
+
+Processes each task's operations:
+
+| Operation | Steps |
+|---|---|
+| **Update** | 1. Read old entry from cache/disk, deactivate it. 2. Create new entry with updated value/height. |
+| **Delete** | 1. Deactivate old entry. 2. Read previous neighbor, deactivate it. 3. Create new neighbor entry with updated NextKeyHash. |
+| **Create** | 1. Create new entry. 2. Read previous neighbor, deactivate it. 3. Create new neighbor with updated NextKeyHash. |
+
+The Updater:
+- Updates the B-tree index (add new position, remove old position)
+- Sends new entries to the Flusher via EntryBuffer
+- Handles out-of-order task IDs (tasks within a block may arrive in any order)
+
+### Flusher
+
+**File**: [`qmdb/src/flusher.rs`](../qmdb/src/flusher.rs)
+
+The most complex pipeline stage. Performs 8 jobs per block:
+
+| Job | Description | I/O |
+|---|---|---|
+| **Job 1** | Append new entries to EntryFile | SSD write |
+| **Job 2** | Clear ActiveBits for deactivated entries | Memory |
+| **Job 3** | Sync twig roots (hash entry trees + active bit trees) | CPU/GPU |
+| **Job 4** | Evict inactive twigs from DRAM | Memory |
+| **Job 5** | Flush EntryFile and TwigFile to SSD | SSD write |
+| **Job 6** | Sync upper tree (propagate twig root changes upward) | CPU |
+| **Job 7** | Prune old twigs (every 500 blocks) | SSD delete |
+| **Job 8** | Update MetaDB (root hash, edge nodes, sizes) | SSD write |
+
+**Pipelining**: Jobs 1-5 run in the repeating flusher thread. Jobs 6-8 are forked as one-time threads, allowing Job 1-2 of the next block to overlap with Job 6-8 of the current block.
+
+**Interlock requirements**:
+1. Job 6-8 threads of different blocks cannot overlap
+2. Job 6 of block N+1 must wait for Job 3 of block N (twig roots shared)
+3. Client cannot start block N+2 before Job 8 of block N completes
+
+### Compactor
+
+**File**: [`qmdb/src/compactor.rs`](../qmdb/src/compactor.rs)
+
+Background garbage collection. When utilization drops below the configured ratio:
+
+1. Scan the oldest active entries
+2. For each active entry: re-create it (append as new entry, deactivate old)
+3. This moves the "oldest active" boundary forward, allowing old twigs to be evicted and pruned
+
+Compaction runs continuously on a dedicated thread per shard, throttled by the ring channel capacity.
+
+---
+
+## TaskHub and Block Processing
+
+**File**: [`qmdb/src/tasks/bptaskhub.rs`](../qmdb/src/tasks/bptaskhub.rs)
+
+The `BlockPairTaskHub` implements double-buffering: at most 2 blocks in flight.
+
+```
+Time ──────────────────────────────────────────────────▶
+
+Block N:   ┌─Prefetch─┐ ┌──Update──┐ ┌──Flush J1-5──┐
+                                            ┌──Flush J6-8──┐
+
+Block N+1:              ┌─Prefetch─┐ ┌──Update──┐ ┌──Flush J1-5──┐
+                                                        ┌──Flush J6-8──┐
+
+Block N+2:                          [blocked until Job 8 of N completes]
+                                    ┌─Prefetch─┐ ...
+```
+
+**ChangeSet** groups operations for a single transaction:
+
+```rust
+pub struct ChangeSet {
+    pub data: Vec<u8>,       // Concatenated keys, values, key_hashes
+    pub op_list: Vec<ChangeOp>,
+    shard_starts: [u32; 16], // Per-shard index into op_list
+    shard_op_count: [u32; 16],
+}
+```
+
+Operations within a ChangeSet must be sorted by `(shard_id, key_hash, op_type)` before submission.
+
+---
+
+## Proof Generation
+
+**File**: [`qmdb/src/merkletree/proof.rs`](../qmdb/src/merkletree/proof.rs)
+
+A Merkle proof for entry at serial number `sn`:
+
+```rust
+pub struct ProofPath {
+    pub left_of_twig: [ProofNode; 11],  // Entry tree path
+    pub right_of_twig: [ProofNode; 3],  // ActiveBits tree path
+    pub upper_path: Vec<ProofNode>,     // Twig root → global root
+    pub serial_num: u64,
+    pub root: [u8; 32],
+}
+```
+
+**Proof verification** (`ProofPath::check()`):
+
+1. Verify left path: hash entry leaf upward 11 levels to get `left_root`
+2. Verify right path: hash active bits page upward 3 levels to get `active_bits_mtl3`
+3. Compute `twig_root = hash2(11, left_root, active_bits_mtl3)`
+4. Verify upper path: hash `twig_root` upward through sibling hashes to reach `root`
+
+**Inclusion proof**: Entry exists with specific key/value at this serial number, and its ActiveBit = 1.
+
+**Exclusion proof**: Two adjacent entries with `key_hash(A) < target < NextKeyHash(A)` prove no entry exists for `target`.
+
+---
+
+## Recovery
+
+**File**: [`qmdb/src/merkletree/recover.rs`](../qmdb/src/merkletree/recover.rs)
+
+On restart, KyumDB rebuilds volatile state from MetaDB + SSD files:
+
+1. **Read MetaDB**: Get heights, file sizes, edge nodes, serial numbers
+2. **Truncate files**: If files are larger than MetaDB records (partial block), truncate to consistent state
+3. **Rebuild trees** (parallel, one thread per shard):
+   - Reconstruct twigs from entry file
+   - Restore active bits by scanning entries
+   - Restore upper tree from edge nodes + twig roots
+4. **Rebuild index**: Scan active entries, populate B-tree
+
+Recovery runs in parallel across all 16 shards using `thread::spawn`.
+
+---
+
+## Threading Model
+
+| Component | Thread Count | Lifetime | Purpose |
+|---|---|---|---|
+| Prefetcher | 512 (pool) | Process lifetime | Pre-read entries for D/C ops |
+| Prefetcher dispatch | 1 per shard | Process lifetime | Route tasks to updater |
+| Updater | 16 (1/shard) | Process lifetime | Apply operations |
+| Flusher (main) | 1 | Process lifetime | Jobs 1-5, spawns Job 6-8 |
+| Flusher (upper tree) | 1 per block | One-time | Jobs 6-8 |
+| Compactor | 16 (1/shard) | Process lifetime | Background GC |
+| Indexer compaction | 1 | Process lifetime | B-tree maintenance |
+| Rayon pool | auto | Process lifetime | Parallel Merkle hashing |
+| Recovery | 16 (1/shard) | Startup only | Parallel tree rebuild |
+
+**Synchronization primitives**:
+- `SyncChannel`: Task queues between pipeline stages
+- `Arc<RwLock<>>`: MetaDB access
+- `DashMap`: Concurrent indexer maps
+- `AtomPtr`: Lock-free BlockPairTaskHub switching
+- `parking_lot::Mutex`: GpuHasher serialization
+- `Condvar`: Proof request signaling
+
+---
+
+## Sharding
+
+Data is partitioned into 16 shards by the first byte of `SHA256(key)`:
+
+```rust
+const SHARD_COUNT: usize = 16;
+const SHARD_DIV: usize = (1 << 16) / SHARD_COUNT;  // 4096
+
+fn byte0_to_shard_id(byte0: u8) -> usize {
+    byte0 as usize * 256 / SHARD_DIV
+}
+```
+
+Each shard owns:
+- 1 EntryFile (HPFile on SSD)
+- 1 TwigFile (HPFile on SSD, if enabled)
+- 1 Tree (in-DRAM upper tree + youngest twig)
+- Portion of B-tree index
+- 1 Updater thread
+- 1 Compactor thread
+
+Shards are fully independent — no cross-shard locking during normal operation. The only synchronization point is the flusher barrier between Job 5 and Job 6, where all shards must complete before upper tree sync begins.
+
+---
+
+## Further Reading
+
+- **Design rationale**: [docs/design.md](design.md) — Detailed explanation of why each data structure was chosen
+- **GPU acceleration**: [docs/gpu-acceleration.md](gpu-acceleration.md) — CUDA kernel details, benchmarks, tuning
+- **Paper**: [QMDB: Quick Merkle Database](https://arxiv.org/pdf/2501.05262) — Full academic paper with proofs
