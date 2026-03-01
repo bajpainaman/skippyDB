@@ -40,3 +40,8 @@ qmdb_results.txt
 qmdb_results.json
 
 .envrc
+
+# Test artifacts
+qmdb/test_adscore/
+qmdb/test_merger/
+qmdb/test_start_block/

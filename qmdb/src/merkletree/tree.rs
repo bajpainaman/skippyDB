@@ -222,18 +222,22 @@ impl UpperTree {
         self.nodes.push(Vec::new()); // push a placeholder that will be removed
         let mut written_nodes = self.nodes.swap_remove(level as usize);
 
+        // Pre-partition n_list by node shard to avoid 75% wasted iteration
+        let mut shard_lists: [Vec<u64>; NODE_SHARD_COUNT] = Default::default();
+        for &i in &n_list {
+            shard_lists[i as usize % NODE_SHARD_COUNT].push(i);
+        }
+
         let mut new_list = Vec::with_capacity(n_list.len());
         rayon::scope(|s| {
-            // run flushing in a threads such that sync_* won't be blocked
-            for (shard_id, nodes) in written_nodes.iter_mut().enumerate() {
-                let n_list = &n_list[..];
+            // run hashing in parallel across node shards
+            for (shard_id, (nodes, shard_list)) in written_nodes
+                .iter_mut()
+                .zip(shard_lists.iter())
+                .enumerate()
+            {
                 let upper_tree = &*self; // change a mutable borrow to an immutable borrow
-                let id: usize = shard_id;
-                if cfg!(feature = "slow_hashing") {
-                    s.spawn(move |_| do_sync_job(upper_tree, nodes, level, id, n_list));
-                } else {
-                    do_sync_job(upper_tree, nodes, level, id, n_list);
-                }
+                s.spawn(move |_| do_sync_job(upper_tree, nodes, level, shard_id, shard_list));
             }
             for &i in n_list.iter() {
                 if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
@@ -284,32 +288,25 @@ impl UpperTree {
     }
 
     pub fn sync_mt_for_active_bits_phase2(&mut self, mut n_list: Vec<u64>) -> Vec<u64> {
+        // Pre-partition L2 items by twig shard
+        let mut l2_by_shard: [Vec<u64>; TWIG_SHARD_COUNT] = Default::default();
+        for &i in &n_list {
+            let twig_id = i >> 1;
+            let (s, _) = get_shard_idx_and_key(twig_id);
+            l2_by_shard[s].push(i);
+        }
+
         let mut new_list = Vec::with_capacity(n_list.len());
         rayon::scope(|s| {
             for (sid, twig_shard) in self.active_twig_shards.iter_mut().enumerate() {
-                if cfg!(feature = "slow_hashing") {
-                    let n_list = &n_list;
-                    let shard_id: usize = sid;
-                    s.spawn(move |_| {
-                        for i in n_list {
-                            let twig_id = i >> 1;
-                            let (s, k) = get_shard_idx_and_key(twig_id);
-                            if s != shard_id {
-                                continue;
-                            };
-                            twig_shard.get_mut(&k).unwrap().sync_l2((i & 1) as i32);
-                        }
-                    });
-                } else {
-                    for i in n_list.iter() {
+                let shard_items = &l2_by_shard[sid];
+                s.spawn(move |_| {
+                    for &i in shard_items {
                         let twig_id = i >> 1;
-                        let (s, k) = get_shard_idx_and_key(twig_id);
-                        if s != sid {
-                            continue;
-                        };
+                        let (_, k) = get_shard_idx_and_key(twig_id);
                         twig_shard.get_mut(&k).unwrap().sync_l2((i & 1) as i32);
                     }
-                }
+                });
             }
 
             for i in &n_list {
@@ -321,31 +318,24 @@ impl UpperTree {
 
         mem::swap(&mut new_list, &mut n_list);
         new_list.clear();
+
+        // Pre-partition L3+top items by twig shard
+        let mut l3_by_shard: [Vec<u64>; TWIG_SHARD_COUNT] = Default::default();
+        for &twig_id in &n_list {
+            let (s, _) = get_shard_idx_and_key(twig_id);
+            l3_by_shard[s].push(twig_id);
+        }
+
         rayon::scope(|s| {
             for (sid, twig_shard) in self.active_twig_shards.iter_mut().enumerate() {
-                if cfg!(feature = "slow_hashing") {
-                    let n_list = &n_list;
-                    let shard_id: usize = sid;
-                    s.spawn(move |_| {
-                        for twig_id in n_list {
-                            let (s, k) = get_shard_idx_and_key(*twig_id);
-                            if s != shard_id {
-                                continue;
-                            };
-                            twig_shard.get_mut(&k).unwrap().sync_l3();
-                            twig_shard.get_mut(&k).unwrap().sync_top();
-                        }
-                    });
-                } else {
-                    for twig_id in n_list.iter() {
-                        let (s, k) = get_shard_idx_and_key(*twig_id);
-                        if s != sid {
-                            continue;
-                        };
+                let shard_items = &l3_by_shard[sid];
+                s.spawn(move |_| {
+                    for &twig_id in shard_items {
+                        let (_, k) = get_shard_idx_and_key(twig_id);
                         twig_shard.get_mut(&k).unwrap().sync_l3();
                         twig_shard.get_mut(&k).unwrap().sync_top();
                     }
-                }
+                });
             }
 
             for i in &n_list {
@@ -581,14 +571,11 @@ fn do_sync_job(
     upper_tree: &UpperTree,
     nodes: &mut HashMap<NodePos, [u8; 32]>,
     level: i64,
-    shard_id: usize,
+    _shard_id: usize,
     n_list: &[u64],
 ) {
     let child_nodes = upper_tree.nodes.get((level - 1) as usize).unwrap();
     for &i in n_list {
-        if i as usize % NODE_SHARD_COUNT != shard_id {
-            continue;
-        }
         let pos = NodePos::pos(level as u64, i);
         if level == FIRST_LEVEL_ABOVE_TWIG {
             let left_option = upper_tree.get_twig_root(2 * i);
@@ -909,41 +896,30 @@ impl Tree {
             .collect::<Vec<u64>>();
         n_list.sort();
 
+        // Pre-partition by twig shard to avoid 75% wasted iteration
+        let mut by_shard: [Vec<u64>; TWIG_SHARD_COUNT] = Default::default();
+        for &i in &n_list {
+            let twig_id = i >> 2;
+            let (s, _) = get_shard_idx_and_key(twig_id);
+            by_shard[s].push(i);
+        }
+
         let mut new_list = Vec::with_capacity(n_list.len());
         rayon::scope(|s| {
             for (sid, twig_shard) in self.upper_tree.active_twig_shards.iter_mut().enumerate() {
-                if cfg!(feature = "slow_hashing") {
-                    let active_bit_shards = &self.active_bit_shards;
-                    let n_list = &n_list;
-                    let shard_id: usize = sid;
-                    s.spawn(move |_| {
-                        for i in n_list {
-                            let twig_id = i >> 2;
-                            let (s, k) = get_shard_idx_and_key(twig_id);
-                            if s != shard_id {
-                                continue;
-                            }
-                            let active_bits = active_bit_shards[s].get(&k).unwrap();
-                            twig_shard
-                                .get_mut(&k)
-                                .unwrap()
-                                .sync_l1((i & 3) as i32, active_bits);
-                        }
-                    });
-                } else {
-                    for i in n_list.iter() {
+                let active_bit_shards = &self.active_bit_shards;
+                let shard_items = &by_shard[sid];
+                s.spawn(move |_| {
+                    for &i in shard_items {
                         let twig_id = i >> 2;
                         let (s, k) = get_shard_idx_and_key(twig_id);
-                        if s != sid {
-                            continue;
-                        }
-                        let active_bits = self.active_bit_shards[s].get(&k).unwrap();
+                        let active_bits = active_bit_shards[s].get(&k).unwrap();
                         twig_shard
                             .get_mut(&k)
                             .unwrap()
                             .sync_l1((i & 3) as i32, active_bits);
                     }
-                }
+                });
             }
             for i in &n_list {
                 if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {

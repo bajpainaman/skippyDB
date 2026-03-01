@@ -2,12 +2,93 @@ use super::entry::{Entry, EntryBz};
 use crate::def::{BIG_BUF_SIZE, DEFAULT_ENTRY_SIZE};
 use crate::utils::{new_big_buf_boxed, BigBuf};
 use dashmap::DashMap;
-use parking_lot::Mutex;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::ptr;
+use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 
 const BIG_BUF_SIZE_I64: i64 = BIG_BUF_SIZE as i64;
+
+/// Lock-free LIFO stack (Treiber stack) for BigBuf recycling.
+/// Avoids Mutex contention when the updater and flusher threads
+/// concurrently push/pop buffers.
+struct LockFreeStack {
+    head: AtomicPtr<StackNode>,
+}
+
+struct StackNode {
+    data: Box<BigBuf>,
+    next: *mut StackNode,
+}
+
+impl LockFreeStack {
+    fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(ptr::null_mut()),
+        }
+    }
+
+    fn push(&self, data: Box<BigBuf>) {
+        let node = Box::into_raw(Box::new(StackNode {
+            data,
+            next: ptr::null_mut(),
+        }));
+        loop {
+            let head = self.head.load(Ordering::Relaxed);
+            unsafe {
+                (*node).next = head;
+            }
+            if self
+                .head
+                .compare_exchange_weak(head, node, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    /// Count elements by traversing the list. Only safe when no concurrent modifications.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        let mut count = 0;
+        let mut node = self.head.load(Ordering::Acquire);
+        while !node.is_null() {
+            count += 1;
+            node = unsafe { (*node).next };
+        }
+        count
+    }
+
+    fn pop(&self) -> Option<Box<BigBuf>> {
+        loop {
+            let head = self.head.load(Ordering::Acquire);
+            if head.is_null() {
+                return None;
+            }
+            let next = unsafe { (*head).next };
+            if self
+                .head
+                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                let node = unsafe { Box::from_raw(head) };
+                return Some(node.data);
+            }
+        }
+    }
+}
+
+impl Drop for LockFreeStack {
+    fn drop(&mut self) {
+        while self.pop().is_some() {}
+    }
+}
+
+// Safety: StackNode contains Box<BigBuf> which is Send, and
+// the atomic operations ensure thread-safe access to the linked list.
+unsafe impl Send for LockFreeStack {}
+unsafe impl Sync for LockFreeStack {}
 
 // It contains content of the new range [Start, End] of EntryFile
 // This content can be read from DRAM before it is flushed to EntryFile,
@@ -58,7 +139,7 @@ pub struct EntryBuffer {
     start: AtomicI64,
     end: AtomicI64,
     buf_map: DashMap<i64, Box<BigBuf>>,
-    free_list: Mutex<Vec<Box<BigBuf>>>,
+    free_list: LockFreeStack,
     pos_sender: SyncSender<i64>,
 }
 
@@ -69,7 +150,7 @@ pub fn new(start: i64, buf_margin: usize) -> (EntryBufferWriter, EntryBufferRead
         start: AtomicI64::new(start),
         end: AtomicI64::new(start),
         buf_map: DashMap::new(),
-        free_list: Mutex::new(Vec::new()),
+        free_list: LockFreeStack::new(),
         pos_sender,
     };
 
@@ -101,7 +182,7 @@ impl EntryBuffer {
         sn_end: u64,
         curr_buf: Box<BigBuf>,
     ) {
-        let end = self.end.load(Ordering::SeqCst);
+        let end = self.end.load(Ordering::Acquire);
         self.buf_map.insert(end / BIG_BUF_SIZE_I64, curr_buf);
         self.pos_sender.send(end).unwrap();
         self.pos_sender.send(i64::MIN).unwrap();
@@ -111,11 +192,7 @@ impl EntryBuffer {
     }
 
     fn allocate_big_buf(&self) -> Box<BigBuf> {
-        let mut free_list = self.free_list.lock();
-        if free_list.len() != 0 {
-            return free_list.pop().unwrap();
-        }
-        new_big_buf_boxed()
+        self.free_list.pop().unwrap_or_else(new_big_buf_boxed)
     }
 
     fn append(
@@ -128,13 +205,13 @@ impl EntryBuffer {
         if size > BIG_BUF_SIZE {
             panic!("Entry too large {} vs {}", size, BIG_BUF_SIZE);
         }
-        let file_pos = self.end.load(Ordering::SeqCst);
+        let file_pos = self.end.load(Ordering::Acquire);
         let idx = file_pos / BIG_BUF_SIZE_I64;
         let offset = file_pos % BIG_BUF_SIZE_I64;
         if offset + (size as i64) < BIG_BUF_SIZE_I64 {
             // curr_buf is large enough
             entry.dump(&mut curr_buf[offset as usize..], deactived_serial_num_list);
-            self.end.fetch_add(size as i64, Ordering::SeqCst);
+            self.end.fetch_add(size as i64, Ordering::Release);
             return (file_pos, curr_buf);
         }
         let mut new_buf = self.allocate_big_buf();
@@ -143,7 +220,7 @@ impl EntryBuffer {
         curr_buf[offset as usize..].copy_from_slice(&new_buf[..copied_length]);
         new_buf.copy_within(copied_length..total_length, 0);
         self.buf_map.insert(idx, curr_buf);
-        self.end.fetch_add(size as i64, Ordering::SeqCst);
+        self.end.fetch_add(size as i64, Ordering::Release);
         self.pos_sender.send(file_pos).unwrap();
         (file_pos, new_buf)
     }
@@ -152,12 +229,12 @@ impl EntryBuffer {
         let res = self.buf_map.get(&idx).unwrap().clone();
         if remove_idx >= 0 {
             let new_start = (remove_idx + 1) * BIG_BUF_SIZE as i64;
-            let old_start = self.start.load(Ordering::SeqCst);
+            let old_start = self.start.load(Ordering::Acquire);
             if old_start < new_start {
-                self.start.store(new_start, Ordering::SeqCst);
+                self.start.store(new_start, Ordering::Release);
             }
             if let Some((_, buf)) = self.buf_map.remove(&remove_idx) {
-                self.free_list.lock().push(buf);
+                self.free_list.push(buf);
             }
         }
         res
@@ -181,8 +258,8 @@ impl EntryBuffer {
         F: FnMut(EntryBz),
     {
         let (idx, offset) = (file_pos / BIG_BUF_SIZE_I64, file_pos % BIG_BUF_SIZE_I64);
-        let start = self.start.load(Ordering::SeqCst);
-        let end = self.end.load(Ordering::SeqCst);
+        let start = self.start.load(Ordering::Acquire);
+        let end = self.end.load(Ordering::Acquire);
         if file_pos < start {
             return (true /*inDisk*/, false /*HaveAccessed*/, curr_buf);
         }
@@ -211,7 +288,7 @@ impl EntryBuffer {
         let target = self.buf_map.get(&idx);
         if target.is_none() {
             // check if start has just been changed
-            let start = self.start.load(Ordering::SeqCst);
+            let start = self.start.load(Ordering::Acquire);
             if file_pos < start {
                 return (true /*inDisk*/, false /*HaveAccessed*/, curr_buf);
             }
@@ -600,7 +677,6 @@ mod test_entry_buffer {
             });
         }
 
-        let free_list = reader.entry_buffer.free_list.lock();
-        assert_eq!(free_list.len(), 5);
+        assert_eq!(reader.entry_buffer.free_list.len(), 5);
     }
 }

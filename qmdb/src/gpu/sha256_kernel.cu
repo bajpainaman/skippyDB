@@ -236,3 +236,189 @@ extern "C" __global__ void sha256_variable_hash(
         store_be32(&output[i * 4], state[i]);
     }
 }
+
+// ============================================================
+// Kernel 3: Warp-cooperative fixed 65-byte node hash
+//
+// 8 threads cooperate on one SHA256 hash. Each thread "owns" one
+// of the 8 state words (a-h). Warp shuffles rotate state between
+// lanes without shared memory, improving occupancy.
+//
+// Launch with: blockDim.x must be a multiple of 8.
+// Each group of 8 consecutive threads processes one hash job.
+// Grid: (ceil(count * 8 / blockDim.x), 1, 1)
+// ============================================================
+extern "C" __global__ void sha256_node_hash_warp_coop(
+    const uint8_t* __restrict__ jobs,
+    uint8_t* __restrict__ out,
+    uint32_t count
+) {
+    uint32_t global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t job_idx = global_tid / 8;
+    uint32_t lane = global_tid % 8; // 0=a, 1=b, ..., 7=h
+
+    if (job_idx >= count) return;
+
+    const uint8_t* input = jobs + job_idx * 65;
+    uint8_t* output = out + job_idx * 32;
+
+    // Mask for our 8-thread team within the warp
+    uint32_t team_base = (threadIdx.x / 8) * 8;
+    uint32_t team_mask = 0xFFu << (team_base % 32);
+
+    // Each thread holds one state word
+    uint32_t my_state = H_INIT[lane];
+
+    // --- Block 1: first 64 bytes ---
+    uint32_t W[64];
+    for (int i = 0; i < 16; i++) {
+        W[i] = load_be32(&input[i * 4]);
+    }
+    for (int i = 16; i < 64; i++) {
+        W[i] = gamma1(W[i-2]) + W[i-7] + gamma0(W[i-15]) + W[i-16];
+    }
+
+    for (int i = 0; i < 64; i++) {
+        uint32_t val_a = __shfl_sync(team_mask, my_state, team_base + 0);
+        uint32_t val_b = __shfl_sync(team_mask, my_state, team_base + 1);
+        uint32_t val_c = __shfl_sync(team_mask, my_state, team_base + 2);
+        uint32_t val_d = __shfl_sync(team_mask, my_state, team_base + 3);
+        uint32_t val_e = __shfl_sync(team_mask, my_state, team_base + 4);
+        uint32_t val_f = __shfl_sync(team_mask, my_state, team_base + 5);
+        uint32_t val_g = __shfl_sync(team_mask, my_state, team_base + 6);
+        uint32_t val_h = __shfl_sync(team_mask, my_state, team_base + 7);
+
+        uint32_t T1 = val_h + sigma1(val_e) + ch(val_e, val_f, val_g) + K[i] + W[i];
+        uint32_t T2 = sigma0(val_a) + maj(val_a, val_b, val_c);
+
+        switch (lane) {
+            case 0: my_state = T1 + T2; break;
+            case 1: my_state = val_a; break;
+            case 2: my_state = val_b; break;
+            case 3: my_state = val_c; break;
+            case 4: my_state = val_d + T1; break;
+            case 5: my_state = val_e; break;
+            case 6: my_state = val_f; break;
+            case 7: my_state = val_g; break;
+        }
+    }
+
+    my_state += H_INIT[lane];
+
+    // --- Block 2: byte 64 + padding + length ---
+    uint8_t block2[64];
+    block2[0] = input[64];
+    block2[1] = 0x80;
+    #pragma unroll
+    for (int i = 2; i < 56; i++) block2[i] = 0;
+    block2[56] = 0; block2[57] = 0; block2[58] = 0; block2[59] = 0;
+    block2[60] = 0; block2[61] = 0; block2[62] = 0x02; block2[63] = 0x08;
+
+    for (int i = 0; i < 16; i++) {
+        W[i] = load_be32(&block2[i * 4]);
+    }
+    for (int i = 16; i < 64; i++) {
+        W[i] = gamma1(W[i-2]) + W[i-7] + gamma0(W[i-15]) + W[i-16];
+    }
+
+    uint32_t pre_state = my_state;
+
+    for (int i = 0; i < 64; i++) {
+        uint32_t val_a = __shfl_sync(team_mask, my_state, team_base + 0);
+        uint32_t val_b = __shfl_sync(team_mask, my_state, team_base + 1);
+        uint32_t val_c = __shfl_sync(team_mask, my_state, team_base + 2);
+        uint32_t val_d = __shfl_sync(team_mask, my_state, team_base + 3);
+        uint32_t val_e = __shfl_sync(team_mask, my_state, team_base + 4);
+        uint32_t val_f = __shfl_sync(team_mask, my_state, team_base + 5);
+        uint32_t val_g = __shfl_sync(team_mask, my_state, team_base + 6);
+        uint32_t val_h = __shfl_sync(team_mask, my_state, team_base + 7);
+
+        uint32_t T1 = val_h + sigma1(val_e) + ch(val_e, val_f, val_g) + K[i] + W[i];
+        uint32_t T2 = sigma0(val_a) + maj(val_a, val_b, val_c);
+
+        switch (lane) {
+            case 0: my_state = T1 + T2; break;
+            case 1: my_state = val_a; break;
+            case 2: my_state = val_b; break;
+            case 3: my_state = val_c; break;
+            case 4: my_state = val_d + T1; break;
+            case 5: my_state = val_e; break;
+            case 6: my_state = val_f; break;
+            case 7: my_state = val_g; break;
+        }
+    }
+
+    my_state += pre_state;
+
+    // Each thread writes its 4-byte state word
+    store_be32(&output[lane * 4], my_state);
+}
+
+// ============================================================
+// Kernel 4: Fixed 65-byte node hash with Structure-of-Arrays layout
+//
+// Instead of AoS: [level0|left0|right0|level1|left1|right1|...]
+// Uses SoA:       levels[N], lefts[N*32], rights[N*32]
+//
+// Adjacent threads read adjacent 32-byte blocks from lefts/rights,
+// enabling coalesced global memory reads (32B stride vs 65B stride).
+// ============================================================
+extern "C" __global__ void sha256_node_hash_soa(
+    const uint8_t* __restrict__ levels,
+    const uint8_t* __restrict__ lefts,
+    const uint8_t* __restrict__ rights,
+    uint8_t* __restrict__ out,
+    uint32_t count
+) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+
+    uint8_t* output = out + idx * 32;
+
+    // Assemble the 65-byte message in registers from SoA arrays:
+    //   byte 0:     levels[idx]
+    //   bytes 1-32: lefts[idx*32 .. idx*32+32]
+    //   bytes 33-64: rights[idx*32 .. idx*32+32]
+    uint8_t block1[64];
+    block1[0] = levels[idx];
+
+    // Coalesced 32-byte read from lefts array (adjacent threads read adjacent 32B blocks)
+    const uint8_t* left_ptr = lefts + idx * 32;
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        block1[1 + i] = left_ptr[i];
+    }
+
+    // Coalesced 32-byte read from rights array
+    const uint8_t* right_ptr = rights + idx * 32;
+    #pragma unroll
+    for (int i = 0; i < 31; i++) {
+        block1[33 + i] = right_ptr[i];
+    }
+
+    // SHA256 init
+    uint32_t state[8];
+    #pragma unroll
+    for (int i = 0; i < 8; i++) state[i] = H_INIT[i];
+
+    // Block 1: first 64 bytes = [level(1) | left(32) | right[0..31](31)]
+    sha256_compress(state, block1);
+
+    // Block 2: last 1 byte of right + padding + length
+    uint8_t block2[64];
+    block2[0] = right_ptr[31];          // the 65th byte (right[31])
+    block2[1] = 0x80;                   // padding start
+    #pragma unroll
+    for (int i = 2; i < 56; i++) block2[i] = 0;
+    // Length in bits = 65 * 8 = 520 = 0x208
+    block2[56] = 0; block2[57] = 0; block2[58] = 0; block2[59] = 0;
+    block2[60] = 0; block2[61] = 0; block2[62] = 0x02; block2[63] = 0x08;
+
+    sha256_compress(state, block2);
+
+    // Write output (big-endian)
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        store_be32(&output[i * 4], state[i]);
+    }
+}

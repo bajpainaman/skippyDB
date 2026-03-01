@@ -1,4 +1,7 @@
-use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig};
+use cudarc::driver::{
+    result, CudaDevice, CudaFunction, CudaSlice, DevicePtr, DeviceRepr, LaunchAsync, LaunchConfig,
+};
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// A single node-hash job: SHA256(level || left || right) = 65 bytes input
@@ -16,30 +19,81 @@ unsafe impl DeviceRepr for NodeHashJob {}
 const BLOCK_SIZE: u32 = 256;
 const PTX_SRC: &str = include_str!("sha256_kernel.cu");
 
+/// Pre-allocated host and device buffers for GPU batch operations.
+/// Avoids per-call heap allocation and CUDA device memory allocation.
+struct GpuBuffers {
+    // Node hash (AoS): pre-allocated device buffers
+    d_node_input: CudaSlice<u8>,  // max_batch_size * 65
+    d_node_output: CudaSlice<u8>, // max_batch_size * 32
+    // Node hash (AoS): pre-allocated host buffers
+    h_node_input: Vec<u8>,  // max_batch_size * 65
+    h_node_output: Vec<u8>, // max_batch_size * 32
+    // Node hash (SoA): pre-allocated device buffers
+    d_soa_levels: CudaSlice<u8>,  // max_batch_size * 1
+    d_soa_lefts: CudaSlice<u8>,   // max_batch_size * 32
+    d_soa_rights: CudaSlice<u8>,  // max_batch_size * 32
+    // Node hash (SoA): pre-allocated host buffers
+    h_soa_levels: Vec<u8>,        // max_batch_size * 1
+    h_soa_lefts: Vec<u8>,         // max_batch_size * 32
+    h_soa_rights: Vec<u8>,        // max_batch_size * 32
+    // Variable hash: pre-allocated device output + host output
+    d_var_output: CudaSlice<u8>, // max_batch_size * 32
+    h_var_output: Vec<u8>,       // max_batch_size * 32
+}
+
 /// GPU-accelerated batch SHA256 hasher for QMDB Merkle operations.
 ///
-/// Pre-allocates device memory at init for `max_batch_size` jobs.
-/// All methods are safe to call from any thread (device operations are serialized by CUDA).
+/// Uses a CUDA stream for async pipeline (upload → compute → download).
+/// Pre-allocates device and host memory at init for `max_batch_size` jobs,
+/// eliminating per-call allocation overhead.
+///
+/// All methods are safe to call from any thread (operations are serialized
+/// by the internal Mutex and CUDA stream).
 pub struct GpuHasher {
     device: Arc<CudaDevice>,
     node_hash_fn: CudaFunction,
     var_hash_fn: CudaFunction,
+    warp_coop_fn: CudaFunction,
+    soa_hash_fn: CudaFunction,
     max_batch_size: usize,
+    bufs: Mutex<GpuBuffers>,
 }
 
 impl GpuHasher {
+    /// Returns the number of available CUDA devices.
+    pub fn device_count() -> Result<i32, String> {
+        CudaDevice::count().map_err(|e| format!("CUDA device count failed: {}", e))
+    }
+
     /// Create a new GpuHasher on GPU device 0.
     /// `max_batch_size`: maximum number of hashes per batch (e.g. 200_000).
-    /// Pre-compiles the CUDA kernels and validates the device.
+    /// Pre-compiles the CUDA kernels, creates a stream, and pre-allocates buffers.
     pub fn new(max_batch_size: usize) -> Result<Self, String> {
-        let device = CudaDevice::new(0).map_err(|e| format!("CUDA device init failed: {}", e))?;
+        Self::new_on_device(0, max_batch_size)
+    }
+
+    /// Create a new GpuHasher on a specific GPU device.
+    /// `ordinal`: CUDA device index (0, 1, 2, ...).
+    /// `max_batch_size`: maximum number of hashes per batch.
+    pub fn new_on_device(ordinal: usize, max_batch_size: usize) -> Result<Self, String> {
+        let device = CudaDevice::new_with_stream(ordinal)
+            .map_err(|e| format!("CUDA device {} init failed: {}", ordinal, e))?;
 
         // Compile PTX from CUDA source at runtime via NVRTC
         let ptx = cudarc::nvrtc::compile_ptx(PTX_SRC)
             .map_err(|e| format!("NVRTC compilation failed: {}", e))?;
 
         device
-            .load_ptx(ptx, "sha256", &["sha256_node_hash", "sha256_variable_hash"])
+            .load_ptx(
+                ptx,
+                "sha256",
+                &[
+                    "sha256_node_hash",
+                    "sha256_variable_hash",
+                    "sha256_node_hash_warp_coop",
+                    "sha256_node_hash_soa",
+                ],
+            )
             .map_err(|e| format!("PTX load failed: {}", e))?;
 
         let node_hash_fn = device
@@ -50,17 +104,68 @@ impl GpuHasher {
             .get_func("sha256", "sha256_variable_hash")
             .ok_or_else(|| "sha256_variable_hash function not found".to_string())?;
 
+        let warp_coop_fn = device
+            .get_func("sha256", "sha256_node_hash_warp_coop")
+            .ok_or_else(|| "sha256_node_hash_warp_coop function not found".to_string())?;
+
+        let soa_hash_fn = device
+            .get_func("sha256", "sha256_node_hash_soa")
+            .ok_or_else(|| "sha256_node_hash_soa function not found".to_string())?;
+
+        // Pre-allocate persistent device buffers (AoS)
+        let d_node_input: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 65)
+            .map_err(|e| format!("GPU node input alloc failed: {}", e))?;
+        let d_node_output: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU node output alloc failed: {}", e))?;
+
+        // Pre-allocate persistent device buffers (SoA)
+        let d_soa_levels: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size)
+            .map_err(|e| format!("GPU SoA levels alloc failed: {}", e))?;
+        let d_soa_lefts: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU SoA lefts alloc failed: {}", e))?;
+        let d_soa_rights: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU SoA rights alloc failed: {}", e))?;
+
+        let d_var_output: CudaSlice<u8> = device
+            .alloc_zeros(max_batch_size * 32)
+            .map_err(|e| format!("GPU var output alloc failed: {}", e))?;
+
+        let bufs = Mutex::new(GpuBuffers {
+            d_node_input,
+            d_node_output,
+            h_node_input: vec![0u8; max_batch_size * 65],
+            h_node_output: vec![0u8; max_batch_size * 32],
+            d_soa_levels: d_soa_levels,
+            d_soa_lefts: d_soa_lefts,
+            d_soa_rights: d_soa_rights,
+            h_soa_levels: vec![0u8; max_batch_size],
+            h_soa_lefts: vec![0u8; max_batch_size * 32],
+            h_soa_rights: vec![0u8; max_batch_size * 32],
+            d_var_output,
+            h_var_output: vec![0u8; max_batch_size * 32],
+        });
+
         Ok(Self {
             device,
             node_hash_fn,
             var_hash_fn,
+            warp_coop_fn,
+            soa_hash_fn,
             max_batch_size,
+            bufs,
         })
     }
 
     /// Batch-hash N fixed 65-byte node inputs on the GPU.
     /// Each job = SHA256(level_byte || left_32B || right_32B).
     /// Returns N x [u8; 32] hashes, byte-identical to CPU `hasher::hash2`.
+    ///
+    /// Uses pre-allocated buffers and async CUDA stream for pipelined execution.
     pub fn batch_node_hash(&self, jobs: &[NodeHashJob]) -> Vec<[u8; 32]> {
         let n = jobs.len();
         if n == 0 {
@@ -73,52 +178,61 @@ impl GpuHasher {
             self.max_batch_size
         );
 
-        // Flatten jobs to packed 65-byte layout for the kernel
-        let mut flat_input = vec![0u8; n * 65];
+        let mut bufs = self.bufs.lock();
+
+        // Flatten jobs into pre-allocated host buffer
         for (i, job) in jobs.iter().enumerate() {
             let off = i * 65;
-            flat_input[off] = job.level;
-            flat_input[off + 1..off + 33].copy_from_slice(&job.left);
-            flat_input[off + 33..off + 65].copy_from_slice(&job.right);
+            bufs.h_node_input[off] = job.level;
+            bufs.h_node_input[off + 1..off + 33].copy_from_slice(&job.left);
+            bufs.h_node_input[off + 33..off + 65].copy_from_slice(&job.right);
         }
 
-        // Upload to device
-        let d_input = self
-            .device
-            .htod_copy(flat_input)
+        // Async upload to pre-allocated device buffer (partial copy)
+        let stream = *self.device.cu_stream();
+        unsafe {
+            result::memcpy_htod_async(
+                *bufs.d_node_input.device_ptr(),
+                &bufs.h_node_input[..n * 65],
+                stream,
+            )
             .expect("GPU input upload failed");
-        let d_output: CudaSlice<u8> = self
-            .device
-            .alloc_zeros(n * 32)
-            .expect("GPU output alloc failed");
+        }
 
-        // Launch kernel
+        // Launch kernel (queued on same stream, executes after upload completes)
         let grid = ((n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
-        let block = (BLOCK_SIZE, 1, 1);
         let cfg = LaunchConfig {
             grid_dim: grid,
-            block_dim: block,
+            block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
 
         unsafe {
             self.node_hash_fn
                 .clone()
-                .launch(cfg, (&d_input, &d_output, n as u32))
+                .launch(cfg, (&bufs.d_node_input, &bufs.d_node_output, n as u32))
                 .expect("GPU kernel launch failed");
         }
 
-        // Download results
-        let flat_output = self
-            .device
-            .dtoh_sync_copy(&d_output)
+        // Async download to pre-allocated host buffer (partial copy)
+        let d_out_ptr = *bufs.d_node_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_node_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
             .expect("GPU output download failed");
+        }
+
+        // Synchronize: wait for upload → compute → download pipeline to complete
+        self.device.synchronize().expect("GPU sync failed");
 
         // Convert flat bytes to array of [u8; 32]
         let mut result = Vec::with_capacity(n);
         for i in 0..n {
             let mut hash = [0u8; 32];
-            hash.copy_from_slice(&flat_output[i * 32..(i + 1) * 32]);
+            hash.copy_from_slice(&bufs.h_node_output[i * 32..(i + 1) * 32]);
             result.push(hash);
         }
         result
@@ -136,9 +250,214 @@ impl GpuHasher {
         out.copy_from_slice(&hashes);
     }
 
+    /// Batch-hash using the warp-cooperative kernel (8 threads per hash).
+    /// Functionally identical to `batch_node_hash` but uses warp shuffles
+    /// for inter-thread state rotation, potentially improving throughput
+    /// on GPUs with high SM counts.
+    pub fn batch_node_hash_warp_coop(&self, jobs: &[NodeHashJob]) -> Vec<[u8; 32]> {
+        let n = jobs.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        assert!(
+            n <= self.max_batch_size,
+            "batch size {} exceeds max {}",
+            n,
+            self.max_batch_size
+        );
+
+        let mut bufs = self.bufs.lock();
+
+        // Flatten jobs into pre-allocated host buffer
+        for (i, job) in jobs.iter().enumerate() {
+            let off = i * 65;
+            bufs.h_node_input[off] = job.level;
+            bufs.h_node_input[off + 1..off + 33].copy_from_slice(&job.left);
+            bufs.h_node_input[off + 33..off + 65].copy_from_slice(&job.right);
+        }
+
+        let stream = *self.device.cu_stream();
+        unsafe {
+            result::memcpy_htod_async(
+                *bufs.d_node_input.device_ptr(),
+                &bufs.h_node_input[..n * 65],
+                stream,
+            )
+            .expect("GPU input upload failed");
+        }
+
+        // 8 threads per job
+        let total_threads = n as u32 * 8;
+        let grid = ((total_threads + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
+        let cfg = LaunchConfig {
+            grid_dim: grid,
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.warp_coop_fn
+                .clone()
+                .launch(cfg, (&bufs.d_node_input, &bufs.d_node_output, n as u32))
+                .expect("GPU warp-coop kernel launch failed");
+        }
+
+        let d_out_ptr = *bufs.d_node_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_node_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
+            .expect("GPU output download failed");
+        }
+
+        self.device.synchronize().expect("GPU sync failed");
+
+        let mut result = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bufs.h_node_output[i * 32..(i + 1) * 32]);
+            result.push(hash);
+        }
+        result
+    }
+
+    /// Batch-hash N fixed 65-byte node inputs using Structure-of-Arrays layout.
+    /// Input is provided as three separate slices: levels, lefts, rights.
+    ///
+    /// SoA layout enables coalesced GPU memory reads: adjacent threads read
+    /// adjacent 32-byte blocks from the lefts/rights arrays (32B stride)
+    /// instead of the AoS 65-byte stride, improving memory bandwidth utilization.
+    ///
+    /// Functionally identical to `batch_node_hash` — produces byte-identical results.
+    pub fn batch_node_hash_soa(
+        &self,
+        levels: &[u8],
+        lefts: &[[u8; 32]],
+        rights: &[[u8; 32]],
+    ) -> Vec<[u8; 32]> {
+        let n = levels.len();
+        assert_eq!(n, lefts.len(), "levels and lefts length mismatch");
+        assert_eq!(n, rights.len(), "levels and rights length mismatch");
+        if n == 0 {
+            return Vec::new();
+        }
+        assert!(
+            n <= self.max_batch_size,
+            "batch size {} exceeds max {}",
+            n,
+            self.max_batch_size
+        );
+
+        let mut bufs = self.bufs.lock();
+
+        // Copy levels into host buffer (contiguous)
+        bufs.h_soa_levels[..n].copy_from_slice(levels);
+
+        // Copy lefts into host buffer (flatten [u8; 32] → contiguous bytes)
+        for (i, left) in lefts.iter().enumerate() {
+            bufs.h_soa_lefts[i * 32..(i + 1) * 32].copy_from_slice(left);
+        }
+
+        // Copy rights into host buffer
+        for (i, right) in rights.iter().enumerate() {
+            bufs.h_soa_rights[i * 32..(i + 1) * 32].copy_from_slice(right);
+        }
+
+        // Async upload three separate arrays
+        let stream = *self.device.cu_stream();
+        unsafe {
+            result::memcpy_htod_async(
+                *bufs.d_soa_levels.device_ptr(),
+                &bufs.h_soa_levels[..n],
+                stream,
+            )
+            .expect("GPU SoA levels upload failed");
+
+            result::memcpy_htod_async(
+                *bufs.d_soa_lefts.device_ptr(),
+                &bufs.h_soa_lefts[..n * 32],
+                stream,
+            )
+            .expect("GPU SoA lefts upload failed");
+
+            result::memcpy_htod_async(
+                *bufs.d_soa_rights.device_ptr(),
+                &bufs.h_soa_rights[..n * 32],
+                stream,
+            )
+            .expect("GPU SoA rights upload failed");
+        }
+
+        // Launch SoA kernel
+        let grid = ((n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
+        let cfg = LaunchConfig {
+            grid_dim: grid,
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.soa_hash_fn
+                .clone()
+                .launch(
+                    cfg,
+                    (
+                        &bufs.d_soa_levels,
+                        &bufs.d_soa_lefts,
+                        &bufs.d_soa_rights,
+                        &bufs.d_node_output,
+                        n as u32,
+                    ),
+                )
+                .expect("GPU SoA kernel launch failed");
+        }
+
+        // Async download
+        let d_out_ptr = *bufs.d_node_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_node_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
+            .expect("GPU SoA output download failed");
+        }
+
+        self.device.synchronize().expect("GPU sync failed");
+
+        let mut result = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bufs.h_node_output[i * 32..(i + 1) * 32]);
+            result.push(hash);
+        }
+        result
+    }
+
+    /// Batch-hash N fixed 65-byte node inputs using SoA layout, writing into an output slice.
+    pub fn batch_node_hash_soa_into(
+        &self,
+        levels: &[u8],
+        lefts: &[[u8; 32]],
+        rights: &[[u8; 32]],
+        out: &mut [[u8; 32]],
+    ) {
+        assert_eq!(levels.len(), out.len(), "levels and output length mismatch");
+        if levels.is_empty() {
+            return;
+        }
+        let hashes = self.batch_node_hash_soa(levels, lefts, rights);
+        out.copy_from_slice(&hashes);
+    }
+
     /// Batch-hash N variable-length inputs on the GPU.
     /// Each input can be any length (typically 50-300 bytes for entries).
     /// Returns N x [u8; 32] hashes, byte-identical to CPU `hasher::hash`.
+    ///
+    /// Variable-length inputs require per-call allocation for the data buffer
+    /// (since total size varies), but output buffers are pre-allocated.
     pub fn batch_hash_variable(&self, inputs: &[&[u8]]) -> Vec<[u8; 32]> {
         let n = inputs.len();
         if n == 0 {
@@ -163,7 +482,7 @@ impl GpuHasher {
             flat_data.extend_from_slice(input);
         }
 
-        // Upload to device
+        // Variable-length data buffer must be allocated per call (size varies)
         let d_data = self
             .device
             .htod_copy(flat_data)
@@ -176,17 +495,14 @@ impl GpuHasher {
             .device
             .htod_copy(lengths)
             .expect("GPU lengths upload failed");
-        let d_output: CudaSlice<u8> = self
-            .device
-            .alloc_zeros(n * 32)
-            .expect("GPU output alloc failed");
+
+        let mut bufs = self.bufs.lock();
 
         // Launch kernel
         let grid = ((n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
-        let block = (BLOCK_SIZE, 1, 1);
         let cfg = LaunchConfig {
             grid_dim: grid,
-            block_dim: block,
+            block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -195,24 +511,92 @@ impl GpuHasher {
                 .clone()
                 .launch(
                     cfg,
-                    (&d_data, &d_offsets, &d_lengths, &d_output, n as u32),
+                    (&d_data, &d_offsets, &d_lengths, &bufs.d_var_output, n as u32),
                 )
                 .expect("GPU variable hash kernel launch failed");
         }
 
-        // Download results
-        let flat_output = self
-            .device
-            .dtoh_sync_copy(&d_output)
+        // Download to pre-allocated host buffer
+        let stream = *self.device.cu_stream();
+        let d_out_ptr = *bufs.d_var_output.device_ptr();
+        unsafe {
+            result::memcpy_dtoh_async(
+                &mut bufs.h_var_output[..n * 32],
+                d_out_ptr,
+                stream,
+            )
             .expect("GPU output download failed");
+        }
+
+        self.device.synchronize().expect("GPU sync failed");
 
         let mut result = Vec::with_capacity(n);
         for i in 0..n {
             let mut hash = [0u8; 32];
-            hash.copy_from_slice(&flat_output[i * 32..(i + 1) * 32]);
+            hash.copy_from_slice(&bufs.h_var_output[i * 32..(i + 1) * 32]);
             result.push(hash);
         }
         result
+    }
+}
+
+/// Multi-GPU hasher that distributes work across all available CUDA devices.
+/// Uses round-robin assignment: shard N goes to GPU (N % num_gpus).
+/// Falls back to single-GPU if only one device is available.
+pub struct MultiGpuHasher {
+    hashers: Vec<GpuHasher>,
+}
+
+impl MultiGpuHasher {
+    /// Initialize a MultiGpuHasher across all available CUDA devices.
+    /// Each GPU gets its own pre-allocated buffers and CUDA stream.
+    pub fn new(max_batch_size: usize) -> Result<Self, String> {
+        let count = GpuHasher::device_count()?;
+        if count <= 0 {
+            return Err("No CUDA devices available".to_string());
+        }
+        let mut hashers = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            hashers.push(GpuHasher::new_on_device(i, max_batch_size)?);
+        }
+        Ok(Self { hashers })
+    }
+
+    /// Number of GPUs being used.
+    pub fn gpu_count(&self) -> usize {
+        self.hashers.len()
+    }
+
+    /// Get the GpuHasher for a given shard (round-robin assignment).
+    pub fn for_shard(&self, shard_id: usize) -> &GpuHasher {
+        &self.hashers[shard_id % self.hashers.len()]
+    }
+
+    /// Get the GpuHasher for GPU device index directly.
+    pub fn device(&self, ordinal: usize) -> &GpuHasher {
+        &self.hashers[ordinal]
+    }
+
+    /// Batch-hash on a specific GPU (selected by shard_id).
+    pub fn batch_node_hash(&self, shard_id: usize, jobs: &[NodeHashJob]) -> Vec<[u8; 32]> {
+        self.for_shard(shard_id).batch_node_hash(jobs)
+    }
+
+    /// Batch-hash variable-length inputs on a specific GPU (selected by shard_id).
+    pub fn batch_hash_variable(&self, shard_id: usize, inputs: &[&[u8]]) -> Vec<[u8; 32]> {
+        self.for_shard(shard_id).batch_hash_variable(inputs)
+    }
+
+    /// Batch-hash using SoA layout on a specific GPU (selected by shard_id).
+    pub fn batch_node_hash_soa(
+        &self,
+        shard_id: usize,
+        levels: &[u8],
+        lefts: &[[u8; 32]],
+        rights: &[[u8; 32]],
+    ) -> Vec<[u8; 32]> {
+        self.for_shard(shard_id)
+            .batch_node_hash_soa(levels, lefts, rights)
     }
 }
 

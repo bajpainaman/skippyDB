@@ -46,6 +46,28 @@ pub fn node_hash_inplace<T: AsRef<[u8]>>(
     target.copy_from_slice(&hasher.finalize());
 }
 
+/// Batch CPU node hashing: hash N independent (level, left, right) tuples.
+/// Processes hashes in a tight loop with a reused Sha256 instance to minimize
+/// overhead and improve cache locality over individual hash2() calls.
+pub fn batch_node_hash_cpu(
+    levels: &[u8],
+    lefts: &[[u8; 32]],
+    rights: &[[u8; 32]],
+    out: &mut [[u8; 32]],
+) {
+    debug_assert_eq!(levels.len(), lefts.len());
+    debug_assert_eq!(levels.len(), rights.len());
+    debug_assert_eq!(levels.len(), out.len());
+
+    let mut hasher = Sha256::new();
+    for i in 0..levels.len() {
+        hasher.update([levels[i]]);
+        hasher.update(&lefts[i]);
+        hasher.update(&rights[i]);
+        out[i].copy_from_slice(&hasher.finalize_reset());
+    }
+}
+
 /// Batch node hash using GPU. Hashes N jobs of (level, left, right) → N hashes.
 /// Falls back to CPU if `gpu` is None.
 #[cfg(feature = "cuda")]
@@ -65,4 +87,17 @@ pub fn batch_hash_variable_gpu(
     inputs: &[&[u8]],
 ) -> Vec<Hash32> {
     gpu.batch_hash_variable(inputs)
+}
+
+/// Batch node hash using GPU with SoA (Structure-of-Arrays) layout.
+/// SoA enables coalesced GPU memory reads for improved bandwidth utilization.
+#[cfg(feature = "cuda")]
+pub fn batch_node_hash_soa_gpu(
+    gpu: &crate::gpu::GpuHasher,
+    levels: &[u8],
+    lefts: &[[u8; 32]],
+    rights: &[[u8; 32]],
+    out: &mut [[u8; 32]],
+) {
+    gpu.batch_node_hash_soa_into(levels, lefts, rights, out);
 }

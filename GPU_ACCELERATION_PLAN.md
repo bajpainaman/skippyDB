@@ -818,31 +818,60 @@ For 200K batch size: 13MB input + 6.4MB output = ~19.4MB persistent GPU memory.
 ### 12.2 Suggested Rollout Order
 
 ```
-Phase 1 (Immediate):
+Phase 1 (Immediate): ✅ COMPLETE
   P1 → P2 → P3
-  Benchmark after each change.
+  P1: Unlocked rayon parallelism (removed slow_hashing gate)
+  P2: Pre-partition n_list by shard (eliminated 75% wasted iteration)
+  P3: Relaxed atomic orderings (SeqCst → Acquire/Release)
 
-Phase 2 (Short-term):
+Phase 2 (Short-term): ✅ COMPLETE
   P7 → P5 → P6
-  GPU-focused optimizations, benchmark with GPU profiler.
+  P7: Persistent GPU memory pools (pre-allocated CudaSlice buffers)
+  P5: SoA (Structure-of-Arrays) GPU kernel + batch_node_hash_soa API
+      - New CUDA kernel: sha256_node_hash_soa (separate levels/lefts/rights arrays)
+      - Coalesced 32-byte reads for lefts/rights (32B stride vs 65B AoS stride)
+      - Pre-allocated SoA device+host buffers alongside AoS buffers
+      - MultiGpuHasher SoA dispatch support
+  P6: Async CUDA stream pipeline (new_with_stream + memcpy_async)
 
-Phase 3 (Medium-term):
+Phase 3 (Medium-term): ✅ COMPLETE
   P4 → P9 → P10
-  CPU-focused optimizations for non-GPU deployments.
+  P4: batch_node_hash_cpu with Sha256::finalize_reset()
+  P9: Twig recovery batching (level-0 cone via batch_node_hash_cpu)
+  P10: Lock-free Treiber stack for EntryBuffer free_list
 
-Phase 4 (Long-term / Experimental):
+Phase 4 (Long-term / Experimental): ✅ COMPLETE
   P8 → P11 → P12
-  Architecture-level changes, requires dedicated testing infrastructure.
+  P8: MultiGpuHasher with per-device GpuHasher and round-robin shard dispatch
+  P11: NUMA topology detection + shard-to-node mapping module
+  P12: Warp-cooperative SHA256 kernel (8 threads/hash via __shfl_sync)
 ```
 
-### 12.3 Benchmarking Strategy
+### 12.3 Benchmarking Strategy ✅ COMPLETE
 
-Each change should be benchmarked with:
-1. **Microbenchmark:** Isolated hash throughput (hashes/sec)
-2. **Flush benchmark:** End-to-end flush latency (ms/block)
-3. **System benchmark:** Sustained throughput under load (blocks/sec)
+Criterion benchmarks have been added (`qmdb/benches/hash_benchmarks.rs`):
 
-The existing test suite (`check.rs`, `gpu_hasher.rs` tests) provides correctness validation. Add `criterion` benchmarks for each hot path.
+1. **Microbenchmarks:**
+   - `single_hash`: SHA256 throughput at 32/65/128/256/512B input sizes
+   - `node_hash_inplace`: In-place 65B node hash latency
+   - `variable_hash`: Entry hash at 50/100/200/300B sizes
+
+2. **Batch CPU benchmarks:**
+   - `batch_cpu_hash/batch_node_hash_cpu`: P4 batch path (finalize_reset) at 10/100/1K/10K/50K
+   - `batch_cpu_hash/individual_hash2`: Sequential baseline for comparison
+
+3. **GPU benchmarks** (with `--features cuda`):
+   - `gpu_node_hash/aos`: AoS kernel at 1K/10K/50K/100K/200K batch sizes
+   - `gpu_node_hash/soa`: SoA kernel (P5) at same batch sizes
+   - `gpu_node_hash/warp_coop`: Warp-cooperative kernel (P12) at same sizes
+   - `gpu_variable_hash`: Variable-length entry hashing
+   - `gpu_vs_cpu`: Direct CPU batch vs GPU AoS vs GPU SoA comparison
+
+Run with:
+```bash
+cargo bench -p qmdb --bench hash_benchmarks
+cargo bench -p qmdb --bench hash_benchmarks --features cuda  # GPU benchmarks
+```
 
 ---
 
