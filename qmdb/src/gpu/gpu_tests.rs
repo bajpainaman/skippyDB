@@ -7,7 +7,7 @@
 mod tests {
     use crate::gpu::{GpuHasher, NodeHashJob};
     use crate::merkletree::twig::{
-        sync_mtree, sync_mtrees_gpu, ActiveBits, Twig, NULL_ACTIVE_BITS, NULL_MT_FOR_TWIG,
+        sync_mtree, sync_mtrees_gpu, ActiveBits, Twig, NULL_MT_FOR_TWIG,
         NULL_NODE_IN_HIGHER_TREE, NULL_TWIG,
     };
     use crate::utils::hasher::{self, Hash32, ZERO_HASH32};
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_hash_alternating_0xAA() {
+    fn test_node_hash_alternating_0x_aa() {
         let gpu = gpu_or_skip!();
         verify_node_hash(&gpu, 4, &fill_hash(0xAA), &fill_hash(0xAA));
     }
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_var_hash_nist_empty_string() {
-        let gpu = gpu_or_skip!();
+        let _gpu = gpu_or_skip!();
         // SHA256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         // Note: batch_hash_variable with empty input should still work
         // But we test 1-byte to avoid zero-length edge case
@@ -1323,7 +1323,7 @@ mod tests {
         }
         let inputs: Vec<&[u8]> = all_data.iter().map(|v| v.as_slice()).collect();
         let results = gpu.batch_hash_variable(&inputs);
-        for (i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
+        for (_i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
             assert_eq!(*result, cpu_hash(data), "Fibonacci len {} mismatch", data.len());
         }
     }
@@ -1339,7 +1339,7 @@ mod tests {
         }
         let inputs: Vec<&[u8]> = all_data.iter().map(|v| v.as_slice()).collect();
         let results = gpu.batch_hash_variable(&inputs);
-        for (i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
+        for (_i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
             assert_eq!(*result, cpu_hash(data), "Power of 2 len {} mismatch", data.len());
         }
     }
@@ -1354,7 +1354,7 @@ mod tests {
         }
         let inputs: Vec<&[u8]> = all_data.iter().map(|v| v.as_slice()).collect();
         let results = gpu.batch_hash_variable(&inputs);
-        for (i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
+        for (_i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
             assert_eq!(*result, cpu_hash(data), "Prime len {} mismatch", data.len());
         }
     }
@@ -1369,7 +1369,7 @@ mod tests {
         }
         let inputs: Vec<&[u8]> = all_data.iter().map(|v| v.as_slice()).collect();
         let results = gpu.batch_hash_variable(&inputs);
-        for (i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
+        for (_i, (data, result)) in all_data.iter().zip(results.iter()).enumerate() {
             assert_eq!(*result, cpu_hash(data), "Boundary len {} mismatch", data.len());
         }
     }
@@ -1460,7 +1460,7 @@ mod tests {
         let jobs = make_random_jobs(22222, 100);
         let r1 = gpu.batch_node_hash(&jobs);
         // Reverse the batch
-        let mut rev_jobs: Vec<NodeHashJob> = jobs.iter().rev().cloned().collect();
+        let rev_jobs: Vec<NodeHashJob> = jobs.iter().rev().cloned().collect();
         let r2 = gpu.batch_node_hash(&rev_jobs);
         // Each result should match its original position
         for (i, job) in jobs.iter().enumerate() {
@@ -2889,7 +2889,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir_gpu);
         let (mut t_cpu, _, _, _) = build_test_tree(dir_cpu, &vec![], 50, 50);
         let (mut t_gpu, _, _, _) = build_test_tree(dir_gpu, &vec![], 50, 50);
-        t_cpu.sync_mt_for_youngest_twig();
+        t_cpu.sync_mt_for_youngest_twig(false);
         t_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
         for i in 1..2048 {
             assert_eq!(t_cpu.mtree_for_youngest_twig[i], t_gpu.mtree_for_youngest_twig[i],
@@ -2911,7 +2911,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir_gpu);
         let (mut t_cpu, _, _, _) = build_test_tree(dir_cpu, &vec![], 500, 500);
         let (mut t_gpu, _, _, _) = build_test_tree(dir_gpu, &vec![], 500, 500);
-        t_cpu.sync_mt_for_youngest_twig();
+        t_cpu.sync_mt_for_youngest_twig(false);
         t_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
         assert_eq!(t_cpu.mtree_for_youngest_twig[1], t_gpu.mtree_for_youngest_twig[1],
             "YT 1000 root mismatch");
@@ -2931,7 +2931,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir_gpu);
         let (mut t_cpu, _, _, _) = build_test_tree(dir_cpu, &vec![], 1024, 1024);
         let (mut t_gpu, _, _, _) = build_test_tree(dir_gpu, &vec![], 1024, 1024);
-        t_cpu.sync_mt_for_youngest_twig();
+        t_cpu.sync_mt_for_youngest_twig(false);
         t_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
         assert_eq!(t_cpu.mtree_for_youngest_twig[1], t_gpu.mtree_for_youngest_twig[1],
             "YT 2048 root mismatch");
@@ -2950,7 +2950,7 @@ mod tests {
         let deact = vec![3u64, 7, 15, 31, 63];
         let (mut t_cpu, _, _, _) = build_test_tree(dir_cpu, &deact, 50, 50);
         let (mut t_gpu, _, _, _) = build_test_tree(dir_gpu, &deact, 50, 50);
-        t_cpu.sync_mt_for_youngest_twig();
+        t_cpu.sync_mt_for_youngest_twig(false);
         t_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
         assert_eq!(t_cpu.mtree_for_youngest_twig[1], t_gpu.mtree_for_youngest_twig[1],
             "Deact root mismatch");
@@ -2970,7 +2970,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir_gpu);
         let (mut t_cpu, _, _, _) = build_test_tree(dir_cpu, &vec![], 50, 50);
         let (mut t_gpu, _, _, _) = build_test_tree(dir_gpu, &vec![], 50, 50);
-        t_cpu.sync_mt_for_youngest_twig();
+        t_cpu.sync_mt_for_youngest_twig(false);
         t_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
         let cpu_nlist = t_cpu.sync_mt_for_active_bits_phase1();
         let gpu_nlist = t_gpu.sync_mt_for_active_bits_phase1_gpu(&gpu);

@@ -6,11 +6,9 @@
 #[cfg(test)]
 #[cfg(feature = "cuda")]
 mod tests {
-    use crate::def::{DEFAULT_FILE_SIZE, SMALL_BUFFER_SIZE};
     use crate::gpu::{GpuHasher, NodeHashJob};
-    use crate::merkletree::check::{check_hash_consistency, check_mt};
+    use crate::merkletree::check::check_hash_consistency;
     use crate::merkletree::helpers::build_test_tree;
-    use crate::merkletree::tree::Tree;
     use crate::merkletree::twig::{
         sync_mtree, sync_mtrees_gpu, ActiveBits, Twig, NULL_MT_FOR_TWIG, NULL_TWIG,
     };
@@ -608,14 +606,14 @@ mod tests {
 
         // CPU path: sync youngest twig + active bits
         let cpu_start = Instant::now();
-        tree_cpu.sync_mt_for_youngest_twig();
-        let cpu_n_list = tree_cpu.sync_mt_for_active_bits_phase1();
+        tree_cpu.sync_mt_for_youngest_twig(false);
+        let _cpu_n_list = tree_cpu.sync_mt_for_active_bits_phase1();
         let cpu_time = cpu_start.elapsed();
 
         // GPU path: same operations via GPU
         let gpu_start = Instant::now();
         tree_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
-        let gpu_n_list = tree_gpu.sync_mt_for_active_bits_phase1_gpu(&gpu);
+        let _gpu_n_list = tree_gpu.sync_mt_for_active_bits_phase1_gpu(&gpu);
         let gpu_time = gpu_start.elapsed();
 
         println!(
@@ -672,7 +670,7 @@ mod tests {
 
         // CPU path
         let cpu_start = Instant::now();
-        tree_cpu.sync_mt_for_youngest_twig();
+        tree_cpu.sync_mt_for_youngest_twig(false);
         let _cpu_n_list = tree_cpu.sync_mt_for_active_bits_phase1();
         let cpu_time = cpu_start.elapsed();
 
@@ -734,7 +732,7 @@ mod tests {
         let (mut tree_gpu, _, _, _) = build_test_tree(dir_gpu, &vec![], 1500, 1500);
 
         // Sync both using respective paths
-        tree_cpu.sync_mt_for_youngest_twig();
+        tree_cpu.sync_mt_for_youngest_twig(false);
         let cpu_n_list = tree_cpu.sync_mt_for_active_bits_phase1();
 
         tree_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
@@ -786,7 +784,7 @@ mod tests {
         let (mut tree_gpu, _, _, _) = build_test_tree(dir_gpu, &vec![], 50, 50);
 
         // First, sync both trees to establish baseline
-        tree_cpu.sync_mt_for_youngest_twig();
+        tree_cpu.sync_mt_for_youngest_twig(false);
         tree_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
 
         // Now verify roots are identical
@@ -822,7 +820,7 @@ mod tests {
         let (mut tree_gpu, _, _, _) = build_test_tree(dir_gpu, &vec![], 1, 0);
 
         // Sync
-        tree_cpu.sync_mt_for_youngest_twig();
+        tree_cpu.sync_mt_for_youngest_twig(false);
         tree_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
 
         assert_eq!(
@@ -1101,11 +1099,11 @@ mod tests {
         let (mut tree_gpu, _, _, _) = build_test_tree(dir_gpu, &deact_list, 50, 50);
 
         // Sync both
-        tree_cpu.sync_mt_for_youngest_twig();
-        let cpu_n_list = tree_cpu.sync_mt_for_active_bits_phase1();
+        tree_cpu.sync_mt_for_youngest_twig(false);
+        let _cpu_n_list = tree_cpu.sync_mt_for_active_bits_phase1();
 
         tree_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
-        let gpu_n_list = tree_gpu.sync_mt_for_active_bits_phase1_gpu(&gpu);
+        let _gpu_n_list = tree_gpu.sync_mt_for_active_bits_phase1_gpu(&gpu);
 
         // Verify youngest twig roots match
         assert_eq!(

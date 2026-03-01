@@ -818,21 +818,29 @@ For 200K batch size: 13MB input + 6.4MB output = ~19.4MB persistent GPU memory.
 ### 12.2 Suggested Rollout Order
 
 ```
-Phase 1 (Immediate):
+Phase 1 (Immediate): ✅ COMPLETE
   P1 → P2 → P3
-  Benchmark after each change.
+  P1: Unlocked rayon parallelism (removed slow_hashing gate)
+  P2: Pre-partition n_list by shard (eliminated 75% wasted iteration)
+  P3: Relaxed atomic orderings (SeqCst → Acquire/Release)
 
-Phase 2 (Short-term):
+Phase 2 (Short-term): ✅ COMPLETE
   P7 → P5 → P6
-  GPU-focused optimizations, benchmark with GPU profiler.
+  P7: Persistent GPU memory pools (pre-allocated CudaSlice buffers)
+  P5: SKIPPED — AoS vs SoA analysis showed marginal benefit for 65B inputs
+  P6: Async CUDA stream pipeline (new_with_stream + memcpy_async)
 
-Phase 3 (Medium-term):
+Phase 3 (Medium-term): ✅ COMPLETE
   P4 → P9 → P10
-  CPU-focused optimizations for non-GPU deployments.
+  P4: batch_node_hash_cpu with Sha256::finalize_reset()
+  P9: Twig recovery batching (level-0 cone via batch_node_hash_cpu)
+  P10: Lock-free Treiber stack for EntryBuffer free_list
 
-Phase 4 (Long-term / Experimental):
+Phase 4 (Long-term / Experimental): ✅ COMPLETE
   P8 → P11 → P12
-  Architecture-level changes, requires dedicated testing infrastructure.
+  P8: MultiGpuHasher with per-device GpuHasher and round-robin shard dispatch
+  P11: NUMA topology detection + shard-to-node mapping module
+  P12: Warp-cooperative SHA256 kernel (8 threads/hash via __shfl_sync)
 ```
 
 ### 12.3 Benchmarking Strategy
