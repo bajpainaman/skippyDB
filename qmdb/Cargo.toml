@@ -38,6 +38,8 @@ aead = "0.5.2"
 generic-array = "1.1.1"
 log = "0.4"
 cudarc = { version = "0.12", optional = true, features = ["cuda-12060"] }
+flash-map = { path = "../flash-map", optional = true, features = ["cuda", "cpu-fallback"] }
+bytemuck = { version = "1.14", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.2", optional = true }
@@ -66,4 +68,4 @@ directio = ["io-uring"]
 hpfile_all_in_mem = ["hpfile/all_in_mem"]
 in_sp1=[]
 slow_hashing=[]
-cuda = ["cudarc"]
+cuda = ["cudarc", "flash-map"]
