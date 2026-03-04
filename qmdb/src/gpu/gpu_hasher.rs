@@ -1,5 +1,6 @@
 use cudarc::driver::{
-    result, CudaDevice, CudaFunction, CudaSlice, DevicePtr, DeviceRepr, LaunchAsync, LaunchConfig,
+    result, CudaDevice, CudaFunction, CudaSlice, DevicePtr, DevicePtrMut, DeviceRepr, LaunchAsync,
+    LaunchConfig,
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -537,6 +538,104 @@ impl GpuHasher {
             result.push(hash);
         }
         result
+    }
+
+    /// Get a reference to the underlying CUDA device.
+    /// Allows sharing the device context with flash-map or other CUDA code.
+    pub fn device(&self) -> &Arc<CudaDevice> {
+        &self.device
+    }
+
+    /// Device-to-device SHA256 SoA hash: inputs and output stay on GPU.
+    ///
+    /// Takes device-side SoA buffers (levels, lefts, rights) and produces
+    /// hashes directly into a device output buffer. No H↔D transfers.
+    ///
+    /// - `d_levels`: N bytes on device (one level byte per job)
+    /// - `d_lefts`: N*32 bytes on device (contiguous left hashes)
+    /// - `d_rights`: N*32 bytes on device (contiguous right hashes)
+    /// - `n`: number of hash jobs
+    ///
+    /// Returns `CudaSlice<u8>` of N*32 bytes (hash results on device).
+    pub fn batch_node_hash_device_soa(
+        &self,
+        d_levels: &CudaSlice<u8>,
+        d_lefts: &CudaSlice<u8>,
+        d_rights: &CudaSlice<u8>,
+        n: usize,
+    ) -> CudaSlice<u8> {
+        assert!(
+            n <= self.max_batch_size,
+            "batch size {} exceeds max {}",
+            n,
+            self.max_batch_size
+        );
+
+        if n == 0 {
+            return self
+                .device
+                .alloc_zeros::<u8>(0)
+                .expect("GPU empty alloc failed");
+        }
+
+        let bufs = self.bufs.lock();
+
+        let grid = ((n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
+        let cfg = LaunchConfig {
+            grid_dim: grid,
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.soa_hash_fn
+                .clone()
+                .launch(
+                    cfg,
+                    (
+                        d_levels,
+                        d_lefts,
+                        d_rights,
+                        &bufs.d_node_output,
+                        n as u32,
+                    ),
+                )
+                .expect("GPU SoA device kernel launch failed");
+        }
+
+        // Copy results to a new device buffer so we can release the pre-allocated buffer
+        let mut d_result: CudaSlice<u8> = self
+            .device
+            .alloc_zeros(n * 32)
+            .expect("GPU result alloc failed");
+
+        let stream = *self.device.cu_stream();
+        unsafe {
+            result::memcpy_dtod_async(
+                *d_result.device_ptr_mut(),
+                *bufs.d_node_output.device_ptr(),
+                n * 32,
+                stream,
+            )
+            .expect("GPU dtod copy failed");
+        }
+
+        drop(bufs);
+        d_result
+    }
+
+    /// Create a device buffer filled with a repeated byte value.
+    /// Useful for creating level byte arrays on the GPU.
+    pub fn fill_device_bytes(&self, value: u8, count: usize) -> CudaSlice<u8> {
+        let host = vec![value; count];
+        self.device
+            .htod_copy(host)
+            .expect("GPU fill upload failed")
+    }
+
+    /// Synchronize the CUDA stream, blocking until all queued operations complete.
+    pub fn sync(&self) {
+        self.device.synchronize().expect("GPU sync failed");
     }
 }
 
