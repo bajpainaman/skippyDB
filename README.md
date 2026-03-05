@@ -1,10 +1,10 @@
-# KyumDB (formerly QMDB): Quick Merkle Database
+# SkippyDB (formerly QMDB): Quick Merkle Database
 
-![Build Status](https://github.com/bajpainaman/kyumdb/actions/workflows/build.yml/badge.svg)
-![Tests](https://github.com/bajpainaman/kyumdb/actions/workflows/tests.yml/badge.svg)
+![Build Status](https://github.com/bajpainaman/SkippyDB/actions/workflows/build.yml/badge.svg)
+![Tests](https://github.com/bajpainaman/SkippyDB/actions/workflows/tests.yml/badge.svg)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
-A high-performance, verifiable key-value store optimized for blockchain state storage. KyumDB uses an append-only Twig Merkle Tree design to minimize SSD write amplification, perform in-memory Merkleization with minimal DRAM, and provide cryptographic proofs for inclusion, exclusion, and historical states.
+A high-performance, verifiable key-value store optimized for blockchain state storage. SkippyDB uses an append-only Twig Merkle Tree design to minimize SSD write amplification, perform in-memory Merkleization with minimal DRAM, and provide cryptographic proofs for inclusion, exclusion, and historical states.
 
 > **Paper**: [QMDB: Quick Merkle Database](https://arxiv.org/pdf/2501.05262)
 
@@ -12,7 +12,7 @@ A high-performance, verifiable key-value store optimized for blockchain state st
 
 ## Table of Contents
 
-- [Why KyumDB?](#why-kyumdb)
+- [Why SkippyDB?](#why-SkippyDB)
 - [Features](#features)
 - [Architecture Overview](#architecture-overview)
 - [Quick Start](#quick-start)
@@ -43,11 +43,11 @@ A high-performance, verifiable key-value store optimized for blockchain state st
 
 ---
 
-## Why KyumDB?
+## Why SkippyDB?
 
-Traditional databases suffer from write amplification on SSDs when maintaining authenticated data structures. KyumDB solves this with:
+Traditional databases suffer from write amplification on SSDs when maintaining authenticated data structures. SkippyDB solves this with:
 
-| Problem | KyumDB's Solution |
+| Problem | SkippyDB's Solution |
 |---|---|
 | High SSD write amplification | Append-only twig design — no in-place updates |
 | Expensive in-memory Merkle trees | Only upper tree levels in DRAM; twigs on SSD |
@@ -83,7 +83,7 @@ Traditional databases suffer from write amplification on SSDs when maintaining a
                            │ tasks
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     KyumDB Pipeline                              │
+│                     SkippyDB Pipeline                              │
 │                                                                  │
 │  ┌────────────┐    ┌────────────┐    ┌────────────────────────┐  │
 │  │ Prefetcher │───▶│  Updater   │───▶│       Flusher          │  │
@@ -135,8 +135,8 @@ Or use the included script:
 ### Installation
 
 ```bash
-git clone https://github.com/bajpainaman/kyumdb.git
-cd kyumdb
+git clone https://github.com/bajpainaman/SkippyDB.git
+cd SkippyDB
 cargo build --release
 ```
 
@@ -211,7 +211,7 @@ cargo run --example v2_demo
 
 ### Entries
 
-An **Entry** is the atomic unit of data in KyumDB. Each entry represents a single key-value pair at a specific block height.
+An **Entry** is the atomic unit of data in SkippyDB. Each entry represents a single key-value pair at a specific block height.
 
 ```
 Entry := (Key, Value, NextKeyHash, Height, SerialNumber, DeactivatedSNList)
@@ -269,7 +269,7 @@ This design means only ~64 bytes of DRAM per twig (the twig root hash), regardle
 
 ### Sharding
 
-KyumDB divides keyspace into **16 shards** based on the first byte of `SHA256(key)`:
+SkippyDB divides keyspace into **16 shards** based on the first byte of `SHA256(key)`:
 
 ```
 shard_id = key_hash[0] * 256 / SHARD_DIV    // SHARD_DIV = 4096
@@ -286,7 +286,7 @@ Shards are processed in parallel via `rayon`.
 
 ### The Pipeline
 
-KyumDB processes blocks through a 3-stage pipeline:
+SkippyDB processes blocks through a 3-stage pipeline:
 
 ```
 Block N:     [Prefetch] ──▶ [Update] ──▶ [Flush (Jobs 1-5)]
@@ -487,7 +487,7 @@ let meta_infos = ads.flush();
 
 ## GPU Acceleration (CUDA)
 
-KyumDB supports optional GPU-accelerated SHA256 batch hashing for Merkle tree operations. See [docs/gpu-acceleration.md](docs/gpu-acceleration.md) for the full guide.
+SkippyDB supports optional GPU-accelerated SHA256 batch hashing for Merkle tree operations. See [docs/gpu-acceleration.md](docs/gpu-acceleration.md) for the full guide.
 
 ### Quick Setup
 
@@ -538,7 +538,7 @@ let hashes = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
 
 Tested on commodity hardware with NVMe SSDs:
 
-| Metric | KyumDB | RocksDB | Improvement |
+| Metric | SkippyDB | RocksDB | Improvement |
 |---|---|---|---|
 | Sequential writes | ~1.2M ops/s | ~200K ops/s | **6x** |
 | Random reads | ~800K ops/s | ~500K ops/s | **1.6x** |
@@ -552,7 +552,7 @@ GPU acceleration adds ~3-5x throughput improvement for Merkle tree hashing at ba
 ## Directory Structure
 
 ```
-kyumdb/
+SkippyDB/
 ├── qmdb/                          # Core library
 │   ├── src/
 │   │   ├── lib.rs                 # AdsCore, AdsWrap, ADS trait
@@ -704,7 +704,7 @@ Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
 
 ## Citation
 
-If you use KyumDB in a publication, please cite:
+If you use SkippyDB in a publication, please cite:
 
 > **QMDB: Quick Merkle Database**
 > Isaac Zhang, Ryan Zarick, Daniel Wong, Thomas Kim, Bryan Pellegrino, Mignon Li, Kelvin Wong
@@ -721,7 +721,7 @@ If you use KyumDB in a publication, please cite:
 
 ---
 
-KyumDB is a product of [LayerZero Labs](https://layerzero.network) Research.
+SkippyDB is a product of [LayerZero Labs](https://layerzero.network) Research.
 
 <p align="center">
   <a href="https://layerzero.network#gh-dark-mode-only">
