@@ -1,11 +1,11 @@
 [package]
-name = "kyumdb"
+name = "skippydb"
 version = "0.2.0"
 edition = "2021"
 description = "A high-performance verifiable key-value store with SHA256 Merkle trees and optional CUDA GPU acceleration, designed for blockchain state storage."
 repository = "https://github.com/bajpainaman/kyumdb"
 homepage = "https://github.com/bajpainaman/kyumdb"
-documentation = "https://docs.rs/kyumdb"
+documentation = "https://docs.rs/skippydb"
 authors = ["LayerZero Labs Research"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"

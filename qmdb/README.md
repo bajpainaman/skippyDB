@@ -1,20 +1,20 @@
-# kyumdb
+# skippydb
 
 A high-performance verifiable key-value store optimized for blockchain state storage, featuring SHA256 Merkle trees with optional CUDA GPU acceleration.
 
 ## Installation
 
 ```bash
-cargo add kyumdb
+cargo add skippydb
 # With GPU acceleration:
-cargo add kyumdb --features cuda
+cargo add skippydb --features cuda
 ```
 
 ## Quick Start
 
 ```rust
-use kyumdb::config::Config;
-use kyumdb::AdsCore;
+use skippydb::config::Config;
+use skippydb::AdsCore;
 
 let config = Config::from_dir("/path/to/data");
 AdsCore::init_dir(&config);
@@ -39,13 +39,13 @@ With `--features cuda`, KyumDB batches Merkle tree SHA256 operations to CUDA cor
 - Async pipelining, fused active bits, GPU-resident upper tree
 - Multi-GPU support via `MultiGpuHasher`
 
-See the [GPU Integration Guide](https://github.com/bajpainaman/kyumdb/blob/main/docs/gpu-integration-guide.md) for usage patterns.
+See the [GPU Integration Guide](https://github.com/bajpainaman/skippydb/blob/main/docs/gpu-integration-guide.md) for usage patterns.
 
 ## Documentation
 
-- [API Docs (docs.rs)](https://docs.rs/kyumdb)
-- [GPU Acceleration Details](https://github.com/bajpainaman/kyumdb/blob/main/docs/gpu-acceleration.md)
-- [GPU Integration Guide](https://github.com/bajpainaman/kyumdb/blob/main/docs/gpu-integration-guide.md)
+- [API Docs (docs.rs)](https://docs.rs/skippydb)
+- [GPU Acceleration Details](https://github.com/bajpainaman/skippydb/blob/main/docs/gpu-acceleration.md)
+- [GPU Integration Guide](https://github.com/bajpainaman/skippydb/blob/main/docs/gpu-integration-guide.md)
 
 ## License
 

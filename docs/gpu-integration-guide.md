@@ -36,7 +36,7 @@ This is the default entry point for all Merkle node hashing. It selects
 CPU, AoS GPU, or SoA GPU based on the job count.
 
 ```rust
-use kyumdb::gpu::{GpuHasher, NodeHashJob};
+use skippydb::gpu::{GpuHasher, NodeHashJob};
 
 let gpu = GpuHasher::new(200_000)?;
 let jobs: Vec<NodeHashJob> = /* collect your hash jobs */;
@@ -107,7 +107,7 @@ root  = SHA256(11 || left_root || L3)
 ### Example
 
 ```rust
-use kyumdb::gpu::{GpuHasher};
+use skippydb::gpu::{GpuHasher};
 
 let gpu = GpuHasher::new(100_000)?;
 
@@ -208,7 +208,7 @@ Stay on CPU when:
 ### Example
 
 ```rust
-use kyumdb::gpu::{GpuHasher, GpuNodeStore};
+use skippydb::gpu::{GpuHasher, GpuNodeStore};
 
 let gpu = GpuHasher::new(200_000)?;
 let mut store = GpuNodeStore::new()?;
@@ -244,7 +244,7 @@ shard assignment.
 ### Constructor
 
 ```rust
-use kyumdb::gpu::MultiGpuHasher;
+use skippydb::gpu::MultiGpuHasher;
 
 let multi = MultiGpuHasher::new(200_000)?;
 println!("Using {} GPUs", multi.gpu_count());

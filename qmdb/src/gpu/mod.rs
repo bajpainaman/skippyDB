@@ -5,12 +5,12 @@
 //! It includes multiple kernel variants (AoS, SoA, warp-cooperative, fused),
 //! async pipelining, GPU-resident node storage, and multi-GPU support.
 //!
-//! Requires the `cuda` feature flag: `cargo add kyumdb --features cuda`
+//! Requires the `cuda` feature flag: `cargo add skippydb --features cuda`
 //!
 //! # Quick Start
 //!
 //! ```no_run
-//! use kyumdb::gpu::{GpuHasher, NodeHashJob};
+//! use skippydb::gpu::{GpuHasher, NodeHashJob};
 //!
 //! let gpu = GpuHasher::new(200_000).expect("CUDA init failed");
 //! let jobs = vec![NodeHashJob {
@@ -22,7 +22,7 @@
 //! ```
 //!
 //! For detailed usage patterns, see the
-//! [GPU Integration Guide](https://github.com/bajpainaman/kyumdb/blob/main/docs/gpu-integration-guide.md).
+//! [GPU Integration Guide](https://github.com/bajpainaman/skippydb/blob/main/docs/gpu-integration-guide.md).
 
 mod gpu_hasher;
 mod gpu_node_store;

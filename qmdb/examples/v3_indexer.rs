@@ -1,10 +1,10 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use kyumdb::def::{SHARD_COUNT, SHARD_DIV};
-use kyumdb::indexer::hybrid::ref_unit::RefUnit;
-use kyumdb::indexer::hybrid::HybridIndexer;
-use kyumdb::indexer::inmem::InMemIndexer;
-use kyumdb::test_helper::RandSrc;
-use kyumdb::utils::hasher;
+use skippydb::def::{SHARD_COUNT, SHARD_DIV};
+use skippydb::indexer::hybrid::ref_unit::RefUnit;
+use skippydb::indexer::hybrid::HybridIndexer;
+use skippydb::indexer::inmem::InMemIndexer;
+use skippydb::test_helper::RandSrc;
+use skippydb::utils::hasher;
 use std::sync::Arc;
 
 #[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]

@@ -4,16 +4,16 @@ use crate::refdb::RefDB;
 use byteorder::{ByteOrder, LittleEndian};
 use hex;
 use parking_lot::RwLock;
-use kyumdb::config::Config;
-use kyumdb::def::{
+use skippydb::config::Config;
+use skippydb::def::{
     DEFAULT_ENTRY_SIZE, IN_BLOCK_IDX_BITS, OP_DELETE, OP_WRITE, SENTRY_COUNT, SHARD_COUNT,
 };
-use kyumdb::entryfile::{Entry, EntryBz};
-use kyumdb::tasks::TasksManager;
-use kyumdb::test_helper::{RandSrc, SimpleTask};
-use kyumdb::utils::changeset::ChangeSet;
-use kyumdb::utils::hasher;
-use kyumdb::{AdsCore, AdsWrap, ADS};
+use skippydb::entryfile::{Entry, EntryBz};
+use skippydb::tasks::TasksManager;
+use skippydb::test_helper::{RandSrc, SimpleTask};
+use skippydb::utils::changeset::ChangeSet;
+use skippydb::utils::hasher;
+use skippydb::{AdsCore, AdsWrap, ADS};
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;

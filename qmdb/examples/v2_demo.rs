@@ -1,13 +1,13 @@
 use parking_lot::RwLock;
-use kyumdb::config::Config;
-use kyumdb::def::{DEFAULT_ENTRY_SIZE, IN_BLOCK_IDX_BITS, OP_CREATE};
-use kyumdb::entryfile::EntryBz;
-use kyumdb::tasks::TasksManager;
-use kyumdb::test_helper::SimpleTask;
-use kyumdb::utils::byte0_to_shard_id;
-use kyumdb::utils::changeset::ChangeSet;
-use kyumdb::utils::hasher;
-use kyumdb::{AdsCore, AdsWrap, ADS};
+use skippydb::config::Config;
+use skippydb::def::{DEFAULT_ENTRY_SIZE, IN_BLOCK_IDX_BITS, OP_CREATE};
+use skippydb::entryfile::EntryBz;
+use skippydb::tasks::TasksManager;
+use skippydb::test_helper::SimpleTask;
+use skippydb::utils::byte0_to_shard_id;
+use skippydb::utils::changeset::ChangeSet;
+use skippydb::utils::hasher;
+use skippydb::{AdsCore, AdsWrap, ADS};
 use std::sync::Arc;
 
 #[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]

@@ -8,15 +8,15 @@ use bench::{
     speed::{db_backend, test_gen::TestGenV2},
 };
 
-use kyumdb::def::IN_BLOCK_IDX_BITS;
-use kyumdb::def::OP_CREATE;
-use kyumdb::def::OP_DELETE;
-use kyumdb::def::OP_READ;
-use kyumdb::def::OP_WRITE;
-use kyumdb::indexer::hybrid::index_cache::COUNTERS;
-use kyumdb::test_helper::RandSrc;
-use kyumdb::test_helper::SimpleTask;
-use kyumdb::utils::{byte0_to_shard_id, changeset::ChangeSet, hasher};
+use skippydb::def::IN_BLOCK_IDX_BITS;
+use skippydb::def::OP_CREATE;
+use skippydb::def::OP_DELETE;
+use skippydb::def::OP_READ;
+use skippydb::def::OP_WRITE;
+use skippydb::indexer::hybrid::index_cache::COUNTERS;
+use skippydb::test_helper::RandSrc;
+use skippydb::test_helper::SimpleTask;
+use skippydb::utils::{byte0_to_shard_id, changeset::ChangeSet, hasher};
 
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
