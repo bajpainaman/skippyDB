@@ -76,7 +76,7 @@ pub fn batch_node_hash_gpu(
     jobs: &[crate::gpu::NodeHashJob],
     out: &mut [[u8; 32]],
 ) {
-    gpu.batch_node_hash_into(jobs, out);
+    gpu.auto_batch_node_hash_into(jobs, out);
 }
 
 /// Batch hash variable-length entries using GPU.

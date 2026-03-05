@@ -6,7 +6,7 @@ use crate::{
 };
 
 use super::{
-    tree::{NodePos, Tree},
+    tree::Tree,
     twig::Twig,
 };
 
@@ -81,11 +81,11 @@ fn compare_tree_nodes(tree_a: &Tree, tree_b: &Tree) {
         panic!("Different nodes count");
     }
     let mut all_same = true;
-    for nth_nodes in tree_a.upper_tree.nodes.clone() {
-        for hash_a in nth_nodes {
-            for pos in hash_a.keys() {
-                if tree_b.upper_tree.get_node(*pos).unwrap()
-                    != tree_b.upper_tree.get_node(*pos).unwrap()
+    for (level, nth_nodes) in tree_a.upper_tree.nodes.iter().enumerate() {
+        for (shard_id, shard) in nth_nodes.iter().enumerate() {
+            for (pos, _hash) in shard.iter_with_context(shard_id, level) {
+                if tree_a.upper_tree.get_node(pos).unwrap()
+                    != tree_b.upper_tree.get_node(pos).unwrap()
                 {
                     println!("Different Hash {}-{}", pos.level(), pos.nth());
                     all_same = false;
@@ -147,15 +147,17 @@ fn compare_twig(twig_id: u64, a: &Twig, b: &Twig) {
 
 #[allow(dead_code)]
 fn compare_nodes(
-    nodes_a: &Vec<Vec<HashMap<NodePos, [u8; 32]>>>,
-    nodes_b: &Vec<Vec<HashMap<NodePos, [u8; 32]>>>,
+    nodes_a: &Vec<Vec<super::tree::NodeShard>>,
+    nodes_b: &Vec<Vec<super::tree::NodeShard>>,
 ) {
     assert_eq!(nodes_a.len(), nodes_b.len(), "Nodes count differs");
     let mut all_same = true;
     for (level, nth_nodes) in nodes_b.iter().enumerate() {
-        for (nth, hash_a) in nth_nodes.iter().enumerate() {
-            for pos in hash_a.keys() {
-                if nodes_a[level][nth].get(pos).unwrap() != nodes_b[level][nth].get(pos).unwrap() {
+        for (nth, shard_b) in nth_nodes.iter().enumerate() {
+            for (pos, _hash) in shard_b.iter_with_context(nth, level) {
+                let val_a = nodes_a[level][nth].get(&pos);
+                let val_b = nodes_b[level][nth].get(&pos);
+                if val_a != val_b {
                     println!("Different Hash {}-{}", pos.level(), pos.nth());
                     all_same = false;
                 }

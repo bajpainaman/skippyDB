@@ -4,7 +4,6 @@ use std::sync::Arc;
 use byteorder::{ByteOrder, LittleEndian};
 
 use crate::def::HPFILE_RANGE;
-use crate::utils::hasher::hash2;
 use hpfile::HPFile;
 use xxhash_rust::xxh32;
 
@@ -152,23 +151,33 @@ impl TwigFile {
                 cache.insert(i, out[idx]);
             }
         }
-        // Level 1: 2 hashes from level 0 results
-        for i in start / 4..end / 4 {
-            let v = hash2(
-                1,
-                cache.get(&(i * 2)).unwrap(),
-                cache.get(&(i * 2 + 1)).unwrap(),
-            );
-            cache.insert(i, v);
+        // Level 1: 2 hashes from level 0 results (batched)
+        {
+            let count = ((end / 4) - (start / 4)) as usize;
+            let mut levels = Vec::with_capacity(count);
+            let mut lefts = Vec::with_capacity(count);
+            let mut rights = Vec::with_capacity(count);
+            for i in start / 4..end / 4 {
+                levels.push(1u8);
+                lefts.push(*cache.get(&(i * 2)).unwrap());
+                rights.push(*cache.get(&(i * 2 + 1)).unwrap());
+            }
+            let mut out_l1 = vec![[0u8; 32]; count];
+            crate::utils::hasher::batch_node_hash_cpu(&levels, &lefts, &rights, &mut out_l1);
+            for (idx, i) in (start / 4..end / 4).enumerate() {
+                cache.insert(i, out_l1[idx]);
+            }
         }
-        // Level 2: 1 hash from level 1 results
-        let id = start / 8;
-        let v = hash2(
-            2,
-            cache.get(&(id * 2)).unwrap(),
-            cache.get(&(id * 2 + 1)).unwrap(),
-        );
-        cache.insert(id, v);
+        // Level 2: 1 hash from level 1 results (batched)
+        {
+            let id = start / 8;
+            let levels = [2u8];
+            let lefts = [*cache.get(&(id * 2)).unwrap()];
+            let rights = [*cache.get(&(id * 2 + 1)).unwrap()];
+            let mut out_l2 = [[0u8; 32]; 1];
+            crate::utils::hasher::batch_node_hash_cpu(&levels, &lefts, &rights, &mut out_l2);
+            cache.insert(id, out_l2[0]);
+        }
         out.copy_from_slice(cache.get(&hash_id).unwrap().as_slice());
     }
 

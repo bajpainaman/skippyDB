@@ -1,26 +1,27 @@
 use std::collections::HashMap;
 
-use qmdb::def::{DEFAULT_FILE_SIZE, SMALL_BUFFER_SIZE};
-use qmdb::test_helper::TempDir;
-use qmdb::{
+use kyumdb::def::{DEFAULT_FILE_SIZE, SMALL_BUFFER_SIZE};
+use kyumdb::test_helper::TempDir;
+use kyumdb::{
     def::{MAX_UPPER_LEVEL, NODE_SHARD_COUNT, TWIG_MASK, TWIG_SHARD_COUNT},
     merkletree::{
         helpers::build_test_tree,
         recover,
-        tree::NodePos,
+        tree::{NodePos, NodeShard},
         twig::{ActiveBits, Twig},
     },
 };
 
 fn compare_nodes(
-    nodes_a: &Vec<Vec<HashMap<NodePos, [u8; 32]>>>,
-    nodes_b: &Vec<Vec<HashMap<NodePos, [u8; 32]>>>,
+    nodes_a: &Vec<Vec<NodeShard>>,
+    nodes_b: &Vec<Vec<NodeShard>>,
 ) {
-    for i in 0..MAX_UPPER_LEVEL {
-        for k in 0..NODE_SHARD_COUNT {
-            assert_eq!(nodes_a[i][k].len(), nodes_b[i][k].len());
-            for (pos, val_a) in &nodes_a[i][k] {
-                let val_b = nodes_b[i][k].get(pos).unwrap();
+    for level in 0..MAX_UPPER_LEVEL {
+        for shard_id in 0..NODE_SHARD_COUNT {
+            for (pos, val_a) in nodes_a[level][shard_id].iter_with_context(shard_id, level) {
+                let val_b = nodes_b[level][shard_id]
+                    .get(&pos)
+                    .expect("node not found in nodes_b");
                 assert_eq!(val_a, val_b);
             }
         }

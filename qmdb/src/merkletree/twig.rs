@@ -167,7 +167,7 @@ pub fn sync_mtrees_gpu(
 
         if !jobs.is_empty() {
             // Batch hash on GPU
-            let results = gpu.batch_node_hash(&jobs);
+            let results = gpu.auto_batch_node_hash(&jobs);
 
             // Scatter results back
             for (result_idx, (twig_idx, target_idx)) in targets.iter().enumerate() {

@@ -80,12 +80,146 @@ pub struct EdgeNode {
     pub value: [u8; 32],
 }
 
+/// Maximum level (exclusive) that uses dense Vec-based storage.
+/// Levels TWIG_ROOT_LEVEL..DENSE_LEVEL_MAX use Vec<Option<[u8;32]>> for O(1)
+/// lookups. Levels DENSE_LEVEL_MAX..MAX_TREE_LEVEL use HashMap for sparse storage.
+const DENSE_LEVEL_MAX: usize = 21;
+
+/// Per-shard node storage: dense (Vec-indexed) or sparse (HashMap).
+/// Dense shards map `nth / NODE_SHARD_COUNT` → hash via direct indexing.
+/// Sparse shards use HashMap<NodePos, hash> for levels with few nodes.
+#[derive(Clone)]
+pub enum NodeShard {
+    Dense(Vec<Option<[u8; 32]>>),
+    Sparse(HashMap<NodePos, [u8; 32]>),
+}
+
+impl NodeShard {
+    fn new_dense() -> Self {
+        NodeShard::Dense(Vec::new())
+    }
+
+    fn new_sparse() -> Self {
+        NodeShard::Sparse(HashMap::new())
+    }
+
+    pub fn get(&self, pos: &NodePos) -> Option<&[u8; 32]> {
+        match self {
+            NodeShard::Dense(v) => {
+                let idx = pos.nth() as usize / NODE_SHARD_COUNT;
+                v.get(idx).and_then(|opt| opt.as_ref())
+            }
+            NodeShard::Sparse(m) => m.get(pos),
+        }
+    }
+
+    pub fn insert(&mut self, pos: NodePos, hash: [u8; 32]) {
+        match self {
+            NodeShard::Dense(v) => {
+                let idx = pos.nth() as usize / NODE_SHARD_COUNT;
+                if idx >= v.len() {
+                    v.resize(idx + 1, None);
+                }
+                v[idx] = Some(hash);
+            }
+            NodeShard::Sparse(m) => {
+                m.insert(pos, hash);
+            }
+        }
+    }
+
+    pub fn remove(&mut self, pos: &NodePos) {
+        match self {
+            NodeShard::Dense(v) => {
+                let idx = pos.nth() as usize / NODE_SHARD_COUNT;
+                if idx < v.len() {
+                    v[idx] = None;
+                }
+            }
+            NodeShard::Sparse(m) => {
+                m.remove(pos);
+            }
+        }
+    }
+
+    /// Iterate over all (NodePos, hash) entries in this shard.
+    pub fn iter(&self) -> NodeShardIter<'_> {
+        match self {
+            NodeShard::Dense(v) => NodeShardIter::Dense {
+                vec: v,
+                idx: 0,
+                shard_id: 0, // set by caller via iter_with_shard
+                level: 0,    // set by caller via iter_with_shard
+            },
+            NodeShard::Sparse(m) => NodeShardIter::Sparse(m.iter()),
+        }
+    }
+
+    /// Iterate with known shard_id and level (needed to reconstruct NodePos
+    /// for dense entries).
+    pub fn iter_with_context(
+        &self,
+        shard_id: usize,
+        level: usize,
+    ) -> NodeShardIter<'_> {
+        match self {
+            NodeShard::Dense(v) => NodeShardIter::Dense {
+                vec: v,
+                idx: 0,
+                shard_id,
+                level,
+            },
+            NodeShard::Sparse(m) => NodeShardIter::Sparse(m.iter()),
+        }
+    }
+}
+
+/// Iterator over entries in a NodeShard.
+pub enum NodeShardIter<'a> {
+    Dense {
+        vec: &'a Vec<Option<[u8; 32]>>,
+        idx: usize,
+        shard_id: usize,
+        level: usize,
+    },
+    Sparse(std::collections::hash_map::Iter<'a, NodePos, [u8; 32]>),
+}
+
+impl<'a> Iterator for NodeShardIter<'a> {
+    type Item = (NodePos, &'a [u8; 32]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            NodeShardIter::Dense {
+                vec,
+                idx,
+                shard_id,
+                level,
+            } => {
+                while *idx < vec.len() {
+                    let i = *idx;
+                    *idx += 1;
+                    if let Some(ref hash) = vec[i] {
+                        let nth = i * NODE_SHARD_COUNT + *shard_id;
+                        let pos = NodePos::pos(*level as u64, nth as u64);
+                        return Some((pos, hash));
+                    }
+                }
+                None
+            }
+            NodeShardIter::Sparse(iter) => {
+                iter.next().map(|(pos, hash)| (*pos, hash))
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct UpperTree {
     pub my_shard_id: usize,
     // the nodes in high level tree (higher than twigs)
     // this variable can be recovered from saved edge nodes and activeTwigs
-    pub nodes: Vec<Vec<HashMap<NodePos, [u8; 32]>>>, //MaxUpperLevel*NodeShardCount maps
+    pub nodes: Vec<Vec<NodeShard>>, //MaxUpperLevel*NodeShardCount maps
     // this variable can be recovered from entry file
     pub active_twig_shards: Vec<HashMap<u64, Box<twig::Twig>>>, //TwigShardCount maps
 }
@@ -100,8 +234,15 @@ impl UpperTree {
     }
 
     pub fn new(my_shard_id: usize) -> Self {
-        let node_shards = vec![HashMap::<NodePos, [u8; 32]>::new(); NODE_SHARD_COUNT];
-        let nodes = vec![node_shards; MAX_TREE_LEVEL];
+        let nodes: Vec<Vec<NodeShard>> = (0..MAX_TREE_LEVEL)
+            .map(|level| {
+                if level < DENSE_LEVEL_MAX {
+                    vec![NodeShard::new_dense(); NODE_SHARD_COUNT]
+                } else {
+                    vec![NodeShard::new_sparse(); NODE_SHARD_COUNT]
+                }
+            })
+            .collect();
         let active_twig_shards = vec![HashMap::<u64, Box<twig::Twig>>::new(); TWIG_SHARD_COUNT];
 
         Self {
@@ -148,15 +289,18 @@ impl UpperTree {
     }
 
     pub fn set_node(&mut self, pos: NodePos, node: [u8; 32]) {
-        self.nodes[pos.level() as usize][pos.nth() as usize % NODE_SHARD_COUNT].insert(pos, node);
+        self.nodes[pos.level() as usize][pos.nth() as usize % NODE_SHARD_COUNT]
+            .insert(pos, node);
     }
 
     pub fn get_node(&self, pos: NodePos) -> Option<&[u8; 32]> {
-        self.nodes[pos.level() as usize][pos.nth() as usize % NODE_SHARD_COUNT].get(&pos)
+        self.nodes[pos.level() as usize][pos.nth() as usize % NODE_SHARD_COUNT]
+            .get(&pos)
     }
 
     fn delete_node(&mut self, pos: NodePos) {
-        self.nodes[pos.level() as usize][pos.nth() as usize % NODE_SHARD_COUNT].remove(&pos);
+        self.nodes[pos.level() as usize][pos.nth() as usize % NODE_SHARD_COUNT]
+            .remove(&pos);
     }
 
     pub fn prune_nodes(&mut self, start: u64, end: u64, youngest_twig_id: u64) -> Vec<u8> {
@@ -405,7 +549,7 @@ impl UpperTree {
 
         // GPU batch hash
         if !jobs.is_empty() {
-            let results = gpu.batch_node_hash(&jobs);
+            let results = gpu.auto_batch_node_hash(&jobs);
             for (idx, pos) in job_positions.iter().enumerate() {
                 self.set_node(*pos, results[idx]);
             }
@@ -475,10 +619,10 @@ impl UpperTree {
             }
         }
 
-        // Add all existing nodes from CPU HashMaps to GPU store
+        // Add all existing nodes from CPU node storage to GPU store
         for level_idx in 0..MAX_TREE_LEVEL {
-            for shard in &self.nodes[level_idx] {
-                for (pos, hash) in shard {
+            for (shard_id, shard) in self.nodes[level_idx].iter().enumerate() {
+                for (pos, hash) in shard.iter_with_context(shard_id, level_idx) {
                     populate_pairs.push((pos.as_u64(), *hash));
                 }
             }
@@ -596,98 +740,49 @@ impl UpperTree {
         gpu: &crate::gpu::GpuHasher,
         n_list: Vec<u64>,
     ) -> Vec<u64> {
-        use crate::gpu::NodeHashJob;
-
-        // Phase 2a: sync_l2 — batch all l2 jobs
-        {
-            let mut jobs = Vec::with_capacity(n_list.len());
-            let mut targets: Vec<(u64, i32)> = Vec::with_capacity(n_list.len());
-
-            for &i in &n_list {
-                let twig_id = i >> 1;
-                let pos = (i & 1) as i32;
-                let (s, k) = get_shard_idx_and_key(twig_id);
-                let twig = self.active_twig_shards[s].get(&k).unwrap();
-                let (l_idx, r_idx) = match pos {
-                    0 => (0usize, 1usize),
-                    1 => (2, 3),
-                    _ => unreachable!(),
-                };
-                jobs.push(NodeHashJob {
-                    level: 9,
-                    left: twig.active_bits_mtl1[l_idx],
-                    right: twig.active_bits_mtl1[r_idx],
-                });
-                targets.push((twig_id, pos));
-            }
-
-            if !jobs.is_empty() {
-                let results = gpu.batch_node_hash(&jobs);
-                for (idx, (twig_id, pos)) in targets.iter().enumerate() {
-                    let (s, k) = get_shard_idx_and_key(*twig_id);
-                    let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
-                    twig.active_bits_mtl2[*pos as usize] = results[idx];
-                }
-            }
-        }
-
-        // Build n_list for sync_l3 level
-        let mut l3_list = Vec::with_capacity(n_list.len());
+        // Build deduplicated twig list from L2-level n_list
+        let mut twig_list: Vec<u64> = Vec::with_capacity(n_list.len());
         for &i in &n_list {
             let twig_id = i / 2;
-            if l3_list.is_empty() || *l3_list.last().unwrap() != twig_id {
-                l3_list.push(twig_id);
+            if twig_list.is_empty() || *twig_list.last().unwrap() != twig_id {
+                twig_list.push(twig_id);
             }
         }
 
-        // Phase 2b: sync_l3 + sync_top — batch all jobs
-        {
-            // sync_l3 jobs (level 10)
-            let mut l3_jobs = Vec::with_capacity(l3_list.len());
-            for &twig_id in &l3_list {
+        if !twig_list.is_empty() {
+            // Gather all 4 L1 values + left_root per twig for the fused kernel
+            let n = twig_list.len();
+            let mut l1_values: Vec<[u8; 32]> = Vec::with_capacity(n * 4);
+            let mut left_roots: Vec<[u8; 32]> = Vec::with_capacity(n);
+
+            for &twig_id in &twig_list {
                 let (s, k) = get_shard_idx_and_key(twig_id);
                 let twig = self.active_twig_shards[s].get(&k).unwrap();
-                l3_jobs.push(NodeHashJob {
-                    level: 10,
-                    left: twig.active_bits_mtl2[0],
-                    right: twig.active_bits_mtl2[1],
-                });
+                l1_values.push(twig.active_bits_mtl1[0]);
+                l1_values.push(twig.active_bits_mtl1[1]);
+                l1_values.push(twig.active_bits_mtl1[2]);
+                l1_values.push(twig.active_bits_mtl1[3]);
+                left_roots.push(twig.left_root);
             }
 
-            if !l3_jobs.is_empty() {
-                let l3_results = gpu.batch_node_hash(&l3_jobs);
-                for (idx, &twig_id) in l3_list.iter().enumerate() {
-                    let (s, k) = get_shard_idx_and_key(twig_id);
-                    let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
-                    twig.active_bits_mtl3 = l3_results[idx];
-                }
-            }
+            // Single GPU dispatch: L2 + L3 + top fused
+            let (twig_roots, l2_out, l3_out) =
+                gpu.batch_active_bits_fused(&l1_values, &left_roots);
 
-            // sync_top jobs (level 11)
-            let mut top_jobs = Vec::with_capacity(l3_list.len());
-            for &twig_id in &l3_list {
+            // Write back all results
+            for (idx, &twig_id) in twig_list.iter().enumerate() {
                 let (s, k) = get_shard_idx_and_key(twig_id);
-                let twig = self.active_twig_shards[s].get(&k).unwrap();
-                top_jobs.push(NodeHashJob {
-                    level: 11,
-                    left: twig.left_root,
-                    right: twig.active_bits_mtl3,
-                });
-            }
-
-            if !top_jobs.is_empty() {
-                let top_results = gpu.batch_node_hash(&top_jobs);
-                for (idx, &twig_id) in l3_list.iter().enumerate() {
-                    let (s, k) = get_shard_idx_and_key(twig_id);
-                    let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
-                    twig.twig_root = top_results[idx];
-                }
+                let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
+                twig.active_bits_mtl2[0] = l2_out[idx * 2];
+                twig.active_bits_mtl2[1] = l2_out[idx * 2 + 1];
+                twig.active_bits_mtl3 = l3_out[idx];
+                twig.twig_root = twig_roots[idx];
             }
         }
 
         // Return next-level n_list
-        let mut new_list = Vec::with_capacity(l3_list.len());
-        for &i in &l3_list {
+        let mut new_list: Vec<u64> = Vec::with_capacity(twig_list.len());
+        for &i in &twig_list {
             if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
                 new_list.push(i / 2);
             }
@@ -698,7 +793,7 @@ impl UpperTree {
 
 fn do_sync_job(
     upper_tree: &UpperTree,
-    nodes: &mut HashMap<NodePos, [u8; 32]>,
+    nodes: &mut NodeShard,
     level: i64,
     _shard_id: usize,
     n_list: &[u64],
@@ -1367,7 +1462,7 @@ impl Tree {
         }
 
         if !jobs.is_empty() {
-            let results = gpu.batch_node_hash(&jobs);
+            let results = gpu.auto_batch_node_hash(&jobs);
             for (idx, (twig_id, pos)) in targets.iter().enumerate() {
                 let (s, k) = get_shard_idx_and_key(*twig_id);
                 let twig = self.upper_tree.active_twig_shards[s]
@@ -1463,5 +1558,187 @@ impl Tree {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========== ME-4: NodeShard Dense/Sparse Tests ==========
+
+    #[test]
+    fn test_node_shard_dense_insert_get_remove() {
+        let mut shard = NodeShard::new_dense();
+        let hash_a = [0xAA; 32];
+        let hash_b = [0xBB; 32];
+
+        // nth values must be multiples of NODE_SHARD_COUNT for shard 0
+        let pos_a = NodePos::pos(5, 0);
+        let pos_b = NodePos::pos(5, NODE_SHARD_COUNT as u64 * 3);
+
+        shard.insert(pos_a, hash_a);
+        shard.insert(pos_b, hash_b);
+
+        assert_eq!(shard.get(&pos_a), Some(&hash_a));
+        assert_eq!(shard.get(&pos_b), Some(&hash_b));
+
+        // Remove pos_a
+        shard.remove(&pos_a);
+        assert_eq!(shard.get(&pos_a), None);
+        // pos_b still present
+        assert_eq!(shard.get(&pos_b), Some(&hash_b));
+
+        // Remove pos_b
+        shard.remove(&pos_b);
+        assert_eq!(shard.get(&pos_b), None);
+    }
+
+    #[test]
+    fn test_node_shard_sparse_insert_get_remove() {
+        let mut shard = NodeShard::new_sparse();
+        let hash_a = [0x11; 32];
+        let hash_b = [0x22; 32];
+        let hash_c = [0x33; 32];
+
+        let pos_a = NodePos::pos(30, 100);
+        let pos_b = NodePos::pos(30, 200);
+        let pos_c = NodePos::pos(31, 50);
+
+        shard.insert(pos_a, hash_a);
+        shard.insert(pos_b, hash_b);
+        shard.insert(pos_c, hash_c);
+
+        assert_eq!(shard.get(&pos_a), Some(&hash_a));
+        assert_eq!(shard.get(&pos_b), Some(&hash_b));
+        assert_eq!(shard.get(&pos_c), Some(&hash_c));
+
+        shard.remove(&pos_b);
+        assert_eq!(shard.get(&pos_b), None);
+        assert_eq!(shard.get(&pos_a), Some(&hash_a));
+        assert_eq!(shard.get(&pos_c), Some(&hash_c));
+    }
+
+    #[test]
+    fn test_node_shard_dense_sparse_equivalence() {
+        let mut dense = NodeShard::new_dense();
+        let mut sparse = NodeShard::new_sparse();
+
+        let test_data: Vec<(NodePos, [u8; 32])> = (0..20)
+            .map(|i| {
+                let nth = i as u64 * NODE_SHARD_COUNT as u64;
+                let pos = NodePos::pos(5, nth);
+                let mut hash = [0u8; 32];
+                for k in 0..32 {
+                    hash[k] = ((i * 7 + k) & 0xFF) as u8;
+                }
+                (pos, hash)
+            })
+            .collect();
+
+        for (pos, hash) in &test_data {
+            dense.insert(*pos, *hash);
+            sparse.insert(*pos, *hash);
+        }
+
+        for (pos, _) in &test_data {
+            let d = dense.get(pos);
+            let s = sparse.get(pos);
+            assert_eq!(
+                d, s,
+                "dense vs sparse mismatch at level={} nth={}",
+                pos.level(),
+                pos.nth()
+            );
+        }
+
+        // Non-existent position returns None in both
+        let missing = NodePos::pos(5, 99999 * NODE_SHARD_COUNT as u64);
+        assert_eq!(dense.get(&missing), None);
+        assert_eq!(sparse.get(&missing), None);
+    }
+
+    #[test]
+    fn test_node_shard_iter_with_context() {
+        let mut shard = NodeShard::new_dense();
+        let shard_id = 2;
+        let level = 7;
+
+        let mut inserted: HashMap<u64, [u8; 32]> = HashMap::new();
+        for i in 0..10 {
+            let nth = i * NODE_SHARD_COUNT + shard_id;
+            let pos = NodePos::pos(level as u64, nth as u64);
+            let mut hash = [0u8; 32];
+            hash[0] = i as u8;
+            shard.insert(pos, hash);
+            inserted.insert(nth as u64, hash);
+        }
+
+        let mut recovered: HashMap<u64, [u8; 32]> = HashMap::new();
+        for (pos, hash) in shard.iter_with_context(shard_id, level) {
+            assert_eq!(pos.level(), level as u64);
+            recovered.insert(pos.nth(), *hash);
+        }
+
+        assert_eq!(
+            inserted.len(),
+            recovered.len(),
+            "iter count mismatch: {} vs {}",
+            inserted.len(),
+            recovered.len()
+        );
+        for (nth, expected_hash) in &inserted {
+            let got = recovered.get(nth);
+            assert_eq!(
+                got,
+                Some(expected_hash),
+                "missing or wrong hash at nth={}", nth
+            );
+        }
+    }
+
+    #[test]
+    fn test_node_shard_dense_auto_resize() {
+        let mut shard = NodeShard::new_dense();
+
+        let pos_0 = NodePos::pos(5, 0);
+        let pos_far = NodePos::pos(5, 1000 * NODE_SHARD_COUNT as u64);
+
+        let hash_0 = [0x01; 32];
+        let hash_far = [0x02; 32];
+
+        shard.insert(pos_0, hash_0);
+        assert_eq!(shard.get(&pos_0), Some(&hash_0));
+
+        // Inserting at a much higher index auto-resizes
+        shard.insert(pos_far, hash_far);
+        assert_eq!(shard.get(&pos_far), Some(&hash_far));
+
+        // Original still accessible
+        assert_eq!(shard.get(&pos_0), Some(&hash_0));
+
+        // In-between indices are None
+        let pos_mid = NodePos::pos(5, 500 * NODE_SHARD_COUNT as u64);
+        assert_eq!(shard.get(&pos_mid), None);
+    }
+
+    #[test]
+    fn test_node_shard_remove_nonexistent() {
+        let mut dense = NodeShard::new_dense();
+        let mut sparse = NodeShard::new_sparse();
+
+        let pos = NodePos::pos(5, 0);
+
+        // Removing from empty shards should not panic
+        dense.remove(&pos);
+        sparse.remove(&pos);
+
+        assert_eq!(dense.get(&pos), None);
+        assert_eq!(sparse.get(&pos), None);
+
+        // Insert then remove a different position
+        dense.insert(NodePos::pos(5, 0), [0xAA; 32]);
+        dense.remove(&NodePos::pos(5, NODE_SHARD_COUNT as u64 * 99));
+        assert_eq!(dense.get(&NodePos::pos(5, 0)), Some(&[0xAA; 32]));
     }
 }

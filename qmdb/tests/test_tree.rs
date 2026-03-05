@@ -1,12 +1,12 @@
 use byteorder::{ByteOrder, LittleEndian};
-use qmdb::def::{
+use kyumdb::def::{
     calc_max_level, DEFAULT_ENTRY_SIZE, ENTRY_BASE_LENGTH, FIRST_LEVEL_ABOVE_TWIG,
     LEAF_COUNT_IN_TWIG, MAX_UPPER_LEVEL, TWIG_MASK, TWIG_SHARD_COUNT,
 };
-use qmdb::entryfile::{entry, EntryBz};
-use qmdb::merkletree::{check, helpers::build_test_tree, recover, tree, twig, Tree};
-use qmdb::test_helper::TempDir;
-use qmdb::utils::hasher::{self, Hash32, ZERO_HASH32};
+use kyumdb::entryfile::{entry, EntryBz};
+use kyumdb::merkletree::{check, helpers::build_test_tree, recover, tree, twig, Tree};
+use kyumdb::test_helper::TempDir;
+use kyumdb::utils::hasher::{self, Hash32, ZERO_HASH32};
 use serial_test::serial;
 
 #[test]
@@ -693,4 +693,31 @@ fn change_twig_roots(tree: &mut Tree, id_list: Vec<u64>) -> Vec<u64> {
         }
     }
     n_list
+}
+
+// ========== End-to-End Hash Consistency Integration Test ==========
+
+#[test]
+#[serial]
+fn test_hash_consistency_full_pipeline() {
+    let dir_name = "./DataTree-hash-consistency";
+    let _tmp_dir = TempDir::new(dir_name);
+
+    // Build a tree with 8192+ entries to span multiple twigs.
+    // LEAF_COUNT_IN_TWIG is 2048, so 8192 entries = 4 full twigs.
+    // count_before = TWIG_MASK (fills first twig), count_after = 8192
+    // ensures we exercise the full pipeline.
+    let deact_sn_list: Vec<u64> = vec![];
+    let (mut tree, _, _, _) =
+        build_test_tree(dir_name, &deact_sn_list, TWIG_MASK as i32, 8192);
+
+    let n_list = tree.flush_files(0, 0);
+    let n_list = tree.upper_tree.evict_twigs(n_list, 0, 0);
+    tree.upper_tree
+        .sync_upper_nodes(n_list, tree.youngest_twig_id);
+
+    // Validate the full optimized pipeline produces a valid Merkle tree:
+    // batched recovery, dense NodeShard, all hash paths.
+    check::check_hash_consistency(&tree);
+    tree.close();
 }

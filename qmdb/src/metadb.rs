@@ -56,6 +56,9 @@ pub struct MetaDB {
     history_file: File,
     extra_data_map: Arc<DashMap<i64, String>>,
     cipher: Option<Aes256Gcm>,
+    /// Handle to the last async commit's background write thread.
+    /// Ensures previous I/O completes before the next commit starts.
+    pending_write: Option<std::thread::JoinHandle<()>>,
 }
 
 fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
@@ -86,6 +89,7 @@ impl MetaDB {
             history_file,
             extra_data_map: Arc::new(DashMap::new()),
             cipher,
+            pending_write: None,
         };
         res.reload_from_file();
         res
@@ -151,6 +155,7 @@ impl MetaDB {
     }
 
     pub fn commit(&mut self) -> Arc<MetaInfo> {
+        self.wait_for_pending_write();
         let kv = self.extra_data_map.remove(&self.info.curr_height).unwrap();
         self.info.extra_data = kv.1;
         let name = format!("{}.{}", self.meta_file_name, self.info.curr_height % 2);
@@ -203,6 +208,136 @@ impl MetaDB {
             }
         }
         Arc::new(self.info.clone())
+    }
+
+    /// Ensure any pending async write completes before proceeding.
+    /// Must be called before any new commit to maintain write ordering.
+    fn wait_for_pending_write(&mut self) {
+        if let Some(handle) = self.pending_write.take() {
+            handle.join().expect("async metadb write thread panicked");
+        }
+    }
+
+    /// Async variant of `commit()`: prepares the serialized data synchronously
+    /// (so MetaInfo is available immediately) but defers file I/O to a
+    /// background thread. Returns Arc<MetaInfo> without blocking on writes.
+    ///
+    /// Subsequent calls to `commit()` or `commit_async()` will wait for
+    /// the previous async write to complete first (preserving durability).
+    pub fn commit_async(&mut self) -> Arc<MetaInfo> {
+        // Wait for any previous async write before starting a new one
+        self.wait_for_pending_write();
+
+        let kv = self.extra_data_map.remove(&self.info.curr_height).unwrap();
+        self.info.extra_data = kv.1;
+
+        // Serialize + encrypt synchronously (CPU-bound, fast)
+        let name = format!(
+            "{}.{}",
+            self.meta_file_name,
+            self.info.curr_height % 2
+        );
+        let meta_bytes = bincode::serialize(&self.info).unwrap();
+        let write_data = if self.cipher.is_some() {
+            let cipher = self.cipher.as_ref().unwrap();
+            let mut nonce_arr = [0u8; NONCE_SIZE];
+            LittleEndian::write_i64(&mut nonce_arr[..8], self.info.curr_height);
+            let mut bz = meta_bytes;
+            match cipher.encrypt_in_place_detached(&nonce_arr.into(), b"", &mut bz) {
+                Err(err) => panic!("{}", err),
+                Ok(tag) => {
+                    let mut out = Vec::with_capacity(8 + bz.len() + tag.len());
+                    out.extend_from_slice(&nonce_arr[0..8]);
+                    out.extend_from_slice(&bz);
+                    out.extend_from_slice(tag.as_slice());
+                    out
+                }
+            }
+        } else {
+            meta_bytes
+        };
+
+        // Prepare history data if needed (CPU-bound)
+        let history_data = if self.info.curr_height % PRUNE_EVERY_NBLOCKS == 0
+            && self.info.curr_height > 0
+        {
+            let mut data = [0u8; SHARD_COUNT * 16];
+            let mut history_segments: Vec<Vec<u8>> = Vec::new();
+            for shard_id in 0..SHARD_COUNT {
+                let start = shard_id * 16;
+                let (twig_id, entry_file_size) =
+                    self.info.first_twig_at_height[shard_id];
+                LittleEndian::write_u64(
+                    &mut data[start..start + 8],
+                    twig_id,
+                );
+                LittleEndian::write_u64(
+                    &mut data[start + 8..start + 16],
+                    entry_file_size as u64,
+                );
+                if self.cipher.is_some() {
+                    let cipher = self.cipher.as_ref().unwrap();
+                    let n = self.info.curr_height / PRUNE_EVERY_NBLOCKS;
+                    let pos = (((n as usize - 1) * SHARD_COUNT) + shard_id)
+                        * (16 + TAG_SIZE);
+                    let mut nonce_arr = [0u8; NONCE_SIZE];
+                    LittleEndian::write_u64(&mut nonce_arr[..8], pos as u64);
+                    match cipher.encrypt_in_place_detached(
+                        &nonce_arr.into(),
+                        b"",
+                        &mut data[start..start + 16],
+                    ) {
+                        Err(err) => panic!("{}", err),
+                        Ok(tag) => {
+                            let mut seg = Vec::with_capacity(16 + TAG_SIZE);
+                            seg.extend_from_slice(&data[start..start + 16]);
+                            seg.extend_from_slice(tag.as_slice());
+                            history_segments.push(seg);
+                        }
+                    };
+                }
+            }
+            if self.cipher.is_none() {
+                Some((data.to_vec(), Vec::new()))
+            } else {
+                Some((Vec::new(), history_segments))
+            }
+        } else {
+            None
+        };
+
+        // Clone the file path for the background thread (history file
+        // can't be sent across threads easily, so we open it in the thread)
+        let history_file_path = if history_data.is_some() {
+            // Re-derive the history file path from the meta file name
+            let dir = Path::new(&self.meta_file_name).parent().unwrap();
+            Some(format!("{}/prune_helper", dir.display()))
+        } else {
+            None
+        };
+
+        let result = Arc::new(self.info.clone());
+
+        // Spawn background thread for file I/O
+        self.pending_write = Some(std::thread::spawn(move || {
+            fs::write(&name, write_data).unwrap();
+            if let Some((plain_data, encrypted_segments)) = history_data {
+                let history_path = history_file_path.unwrap();
+                let mut f = File::options()
+                    .append(true)
+                    .open(&history_path)
+                    .expect("failed to open history file for async write");
+                if !plain_data.is_empty() {
+                    f.write_all(&plain_data).unwrap();
+                } else {
+                    for seg in &encrypted_segments {
+                        f.write_all(seg).unwrap();
+                    }
+                }
+            }
+        }));
+
+        result
     }
 
     pub fn set_curr_height(&mut self, h: i64) {
@@ -435,5 +570,110 @@ mod tests {
             // assert_eq!(200+i as u64, mdb.get_first_twig_at_height(i, 100+i as i64));
         }
         assert_eq!("test", mdb.get_extra_data());
+    }
+
+    // ========== ME-5: Async MetaDB Commit Tests ==========
+
+    #[test]
+    #[serial]
+    fn test_metadb_commit_async_persists() {
+        let (mut mdb, _dir) = create_metadb(None);
+
+        mdb.set_curr_height(100);
+        for i in 0..SHARD_COUNT {
+            mdb.set_next_serial_num(i, 5000 + i as u64);
+            mdb.set_root_hash(i, [(i + 1) as u8; 32]);
+        }
+        mdb.extra_data_map.insert(100, "async_test".to_owned());
+
+        mdb.commit_async();
+        // Wait for the async write to complete by triggering
+        // wait_for_pending_write via a sync commit path
+        mdb.set_curr_height(101);
+        mdb.extra_data_map.insert(101, "".to_owned());
+        mdb.commit();
+
+        // Reload at height 101 and verify the block-100 data was
+        // overwritten by block-101 on the same file slot (101%2==1, 100%2==0),
+        // so we verify the values set before commit_async are reflected
+        // in the state that commit() serialized (since commit_async
+        // mutated info in place).
+        mdb.reload_from_file();
+
+        assert_eq!(101, mdb.get_curr_height());
+        for i in 0..SHARD_COUNT {
+            assert_eq!(5000 + i as u64, mdb.get_next_serial_num(i));
+            assert_eq!([(i + 1) as u8; 32], mdb.get_root_hash(i));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_metadb_commit_async_then_sync() {
+        let (mut mdb, _dir) = create_metadb(None);
+
+        // Block 1: async commit
+        mdb.set_curr_height(1);
+        for i in 0..SHARD_COUNT {
+            mdb.set_next_serial_num(i, 100 + i as u64);
+        }
+        mdb.extra_data_map.insert(1, "block1".to_owned());
+        mdb.commit_async();
+
+        // Block 2: sync commit (waits for async to finish first)
+        mdb.set_curr_height(2);
+        for i in 0..SHARD_COUNT {
+            mdb.set_oldest_active_sn(i, 200 + i as u64);
+        }
+        mdb.extra_data_map.insert(2, "block2".to_owned());
+        mdb.commit();
+
+        mdb.reload_from_file();
+
+        // Height 2 is latest (both .0 and .1 files exist)
+        assert_eq!(2, mdb.get_curr_height());
+        for i in 0..SHARD_COUNT {
+            // Values set in block 1 should persist through block 2
+            assert_eq!(100 + i as u64, mdb.get_next_serial_num(i));
+            // Values set in block 2
+            assert_eq!(200 + i as u64, mdb.get_oldest_active_sn(i));
+        }
+        assert_eq!("block2", mdb.get_extra_data());
+    }
+
+    #[test]
+    #[serial]
+    fn test_metadb_sequential_async_commits() {
+        let (mut mdb, _dir) = create_metadb(None);
+
+        // First async commit
+        mdb.set_curr_height(10);
+        for i in 0..SHARD_COUNT {
+            mdb.set_next_serial_num(i, 1000 + i as u64);
+        }
+        mdb.extra_data_map.insert(10, "first".to_owned());
+        mdb.commit_async();
+
+        // Second async commit (waits for first to complete)
+        mdb.set_curr_height(11);
+        for i in 0..SHARD_COUNT {
+            mdb.set_next_serial_num(i, 2000 + i as u64);
+        }
+        mdb.extra_data_map.insert(11, "second".to_owned());
+        mdb.commit_async();
+
+        // Force wait by doing a sync commit
+        mdb.set_curr_height(12);
+        mdb.extra_data_map.insert(12, "third".to_owned());
+        mdb.commit();
+
+        mdb.reload_from_file();
+
+        // Final state should reflect the last commit
+        assert_eq!(12, mdb.get_curr_height());
+        for i in 0..SHARD_COUNT {
+            assert_eq!(2000 + i as u64, mdb.get_next_serial_num(i));
+        }
+        assert_eq!("third", mdb.get_extra_data());
     }
 }
