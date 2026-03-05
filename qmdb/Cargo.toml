@@ -1,6 +1,6 @@
 [package]
 name = "skippydb"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A high-performance verifiable key-value store with SHA256 Merkle trees and optional CUDA GPU acceleration, designed for blockchain state storage."
 repository = "https://github.com/bajpainaman/kyumdb"
@@ -44,7 +44,7 @@ aead = "0.5.2"
 generic-array = "1.1.1"
 log = "0.4"
 cudarc = { version = "0.12", optional = true, features = ["cuda-12060"] }
-flash-map = { version = "0.1", path = "../flash-map", optional = true, features = ["cuda", "cpu-fallback"] }
+flash-map = { version = "0.5", path = "../flash-map", optional = true, features = ["cuda"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

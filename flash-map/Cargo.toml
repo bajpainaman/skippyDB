@@ -1,6 +1,6 @@
 [package]
 name = "flash-map"
-version = "0.1.1"
+version = "0.5.0"
 edition = "2021"
 authors = ["Naman Bajpai"]
 description = "GPU-native concurrent hash map with bulk-only API. SoA layout, CUDA kernels, CPU fallback. Designed for blockchain state, HFT, and batch-parallel workloads."
@@ -13,9 +13,8 @@ categories = ["data-structures", "concurrency"]
 exclude = ["target/", ".git/"]
 
 [features]
-default = ["cpu-fallback"]
+default = ["rayon"]
 cuda = ["dep:cudarc"]
-cpu-fallback = []
 rayon = ["dep:rayon"]
 tokio = ["dep:tokio"]
 
