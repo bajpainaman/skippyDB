@@ -1,10 +1,10 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use qmdb::def::{SHARD_COUNT, SHARD_DIV};
-use qmdb::indexer::hybrid::ref_unit::RefUnit;
-use qmdb::indexer::hybrid::HybridIndexer;
-use qmdb::indexer::inmem::InMemIndexer;
-use qmdb::test_helper::RandSrc;
-use qmdb::utils::hasher;
+use kyumdb::def::{SHARD_COUNT, SHARD_DIV};
+use kyumdb::indexer::hybrid::ref_unit::RefUnit;
+use kyumdb::indexer::hybrid::HybridIndexer;
+use kyumdb::indexer::inmem::InMemIndexer;
+use kyumdb::test_helper::RandSrc;
+use kyumdb::utils::hasher;
 use std::sync::Arc;
 
 #[cfg(all(not(target_env = "msvc"), feature = "tikv-jemallocator"))]

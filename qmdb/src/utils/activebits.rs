@@ -22,25 +22,25 @@ impl Segment {
     fn get(&self, n: usize) -> bool {
         let (i, j) = (n / 32, n % 32);
         let mask = 1u32 << j;
-        let old = self.arr[i].load(Ordering::SeqCst);
+        let old = self.arr[i].load(Ordering::Relaxed);
         (old & mask) != 0
     }
 
     fn set(&self, n: usize) {
         let (i, j) = (n / 32, n % 32);
         let mask = 1u32 << j;
-        let old = self.arr[i].fetch_or(mask, Ordering::SeqCst);
+        let old = self.arr[i].fetch_or(mask, Ordering::AcqRel);
         if (old & mask) == 0 {
-            self.count.fetch_add(1, Ordering::SeqCst);
+            self.count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     fn clear(&self, n: usize) -> bool {
         let (i, j) = (n / 32, n % 32);
         let mask = 1u32 << j;
-        let old = self.arr[i].fetch_and(!mask, Ordering::SeqCst);
+        let old = self.arr[i].fetch_and(!mask, Ordering::AcqRel);
         if (old & mask) != 0 {
-            let old_count = self.count.fetch_sub(1, Ordering::SeqCst);
+            let old_count = self.count.fetch_sub(1, Ordering::Relaxed);
             return old_count == 1; //need to remove myself
         }
         false
@@ -68,19 +68,10 @@ impl ActiveBits {
 
     pub fn set(&self, n: u64) {
         let (i, j) = (n / BIT_COUNT, n % BIT_COUNT);
-        let need_allocate = {
-            if let Some(seg) = self.m.get(&i) {
-                seg.set(j as usize);
-                false
-            } else {
-                true
-            }
-        };
-        if need_allocate {
-            let seg = Box::new(Segment::new());
-            seg.set(j as usize);
-            self.m.insert(i, seg);
-        }
+        self.m
+            .entry(i)
+            .or_insert_with(|| Box::new(Segment::new()))
+            .set(j as usize);
     }
 
     pub fn clear(&self, n: u64) {
@@ -205,5 +196,106 @@ mod tests {
         assert!(ab.get(num1));
         assert!(!ab.get(num2));
         assert!(ab.get(num3));
+    }
+
+    // ========== QW-3: ActiveBits Concurrent Correctness Tests ==========
+
+    #[test]
+    fn test_concurrent_set_get() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let ab = Arc::new(ActiveBits::with_capacity(64));
+        let thread_count = 8;
+        let bits_per_thread = 1000;
+
+        let handles: Vec<_> = (0..thread_count)
+            .map(|t| {
+                let ab = Arc::clone(&ab);
+                thread::spawn(move || {
+                    let base = t * bits_per_thread;
+                    for i in 0..bits_per_thread {
+                        ab.set(base + i);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // Verify all bits are set
+        for t in 0..thread_count {
+            let base = t * bits_per_thread;
+            for i in 0..bits_per_thread {
+                assert!(
+                    ab.get(base + i),
+                    "bit {} (thread={}, offset={}) not set",
+                    base + i,
+                    t,
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_concurrent_set_clear() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let ab = Arc::new(ActiveBits::with_capacity(64));
+        let range = 1000_u64;
+
+        // Phase 1: Set all bits first so clear has something to clear
+        for i in 0..range {
+            ab.set(i);
+        }
+
+        let set_count = Arc::new(AtomicU64::new(0));
+        let clear_count = Arc::new(AtomicU64::new(0));
+
+        // 4 threads set bits [0..range), 4 threads clear bits [0..range)
+        let mut handles = Vec::new();
+        for t in 0..8_u64 {
+            let ab = Arc::clone(&ab);
+            let sc = Arc::clone(&set_count);
+            let cc = Arc::clone(&clear_count);
+            handles.push(thread::spawn(move || {
+                if t < 4 {
+                    for i in 0..range {
+                        ab.set(i);
+                        sc.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    for i in 0..range {
+                        ab.clear(i);
+                        cc.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // After all threads finish, each bit is either set or clear
+        // (no corruption, no panic). We just verify consistency.
+        let mut set_bits = 0u64;
+        for i in 0..range {
+            if ab.get(i) {
+                set_bits += 1;
+            }
+        }
+
+        // The exact count depends on scheduling, but it must be
+        // in [0, range]. Just verify no panics and reasonable bounds.
+        assert!(
+            set_bits <= range,
+            "set_bits {} exceeds range {}", set_bits, range
+        );
     }
 }

@@ -14,12 +14,12 @@
 ///
 /// GPU-specific tests (P8/P12) are gated behind #[cfg(feature = "cuda")].
 
-use qmdb::def::{BIG_BUF_SIZE, ENTRY_BASE_LENGTH, SHARD_COUNT};
-use qmdb::entryfile::entry::{self, Entry};
-use qmdb::merkletree::twig::{ActiveBits, NULL_TWIG};
-use qmdb::utils::changeset::ChangeSet;
-use qmdb::utils::hasher::{self, batch_node_hash_cpu, hash, hash1, hash2, hash2x, ZERO_HASH32};
-use qmdb::utils::numa::NumaTopology;
+use kyumdb::def::{BIG_BUF_SIZE, ENTRY_BASE_LENGTH, SHARD_COUNT};
+use kyumdb::entryfile::entry::{self, Entry};
+use kyumdb::merkletree::twig::{ActiveBits, NULL_TWIG};
+use kyumdb::utils::changeset::ChangeSet;
+use kyumdb::utils::hasher::{self, batch_node_hash_cpu, hash, hash1, hash2, hash2x, ZERO_HASH32};
+use kyumdb::utils::numa::NumaTopology;
 use sha2::{Digest, Sha256};
 
 // ============================================================
@@ -345,7 +345,7 @@ fn test_hash2_with_zero_hashes() {
 
 #[test]
 fn test_entry_buffer_single_entry() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let entry = make_entry(b"key1", b"value1", 1);
     let pos = writer.append(&entry, &[]);
     assert_eq!(pos, 0);
@@ -354,7 +354,7 @@ fn test_entry_buffer_single_entry() {
 
 #[test]
 fn test_entry_buffer_multiple_entries_same_buf() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let entry = make_entry(b"key", b"val", 1);
     let pos0 = writer.append(&entry, &[]);
     assert_eq!(pos0, 0);
@@ -366,7 +366,7 @@ fn test_entry_buffer_multiple_entries_same_buf() {
 
 #[test]
 fn test_entry_buffer_end_block() {
-    let (mut writer, mut reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, mut reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let value = vec![0x42u8; 10000];
     let entry = make_entry(b"key", &value, 1);
     writer.append(&entry, &[]);
@@ -389,7 +389,7 @@ fn test_entry_buffer_end_block() {
 
 #[test]
 fn test_entry_buffer_get_entry_bz_at() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let value = vec![0x42u8; 10000];
     let entry = make_entry(b"key", &value, 1);
     let dsn: Vec<u64> = vec![1];
@@ -402,7 +402,7 @@ fn test_entry_buffer_get_entry_bz_at() {
 
 #[test]
 fn test_entry_buffer_negative_pos_is_in_disk() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let (in_disk, have_accessed) = writer.get_entry_bz_at(-1, |_| {});
     assert!(in_disk);
     assert!(!have_accessed);
@@ -410,7 +410,7 @@ fn test_entry_buffer_negative_pos_is_in_disk() {
 
 #[test]
 fn test_entry_buffer_spanning_bufs() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let value = vec![0x42u8; 40000]; // Large value to force buf spanning
 
     // Keep appending until we span a buffer boundary
@@ -429,7 +429,7 @@ fn test_entry_buffer_spanning_bufs() {
 #[test]
 #[should_panic(expected = "Entry too large")]
 fn test_entry_buffer_too_large_entry() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let value = vec![0u8; 100000]; // Exceeds BIG_BUF_SIZE
     let entry = make_entry(b"key", &value, 1);
     writer.append(&entry, &[]);
@@ -1024,7 +1024,7 @@ fn test_hash_preimage_resistance() {
 
 #[test]
 fn test_byte0_to_shard_id() {
-    use qmdb::utils::byte0_to_shard_id;
+    use kyumdb::utils::byte0_to_shard_id;
     assert_eq!(byte0_to_shard_id(0), 0);
     assert_eq!(byte0_to_shard_id(255), SHARD_COUNT - 1);
     // Mid-range
@@ -1034,7 +1034,7 @@ fn test_byte0_to_shard_id() {
 
 #[test]
 fn test_byte0_to_shard_id_distribution() {
-    use qmdb::utils::byte0_to_shard_id;
+    use kyumdb::utils::byte0_to_shard_id;
     let mut counts = vec![0usize; SHARD_COUNT];
     for b in 0..=255u8 {
         counts[byte0_to_shard_id(b)] += 1;
@@ -1051,7 +1051,7 @@ fn test_byte0_to_shard_id_distribution() {
 
 #[cfg(feature = "cuda")]
 mod gpu_tests {
-    use qmdb::gpu::{GpuHasher, MultiGpuHasher, NodeHashJob};
+    use kyumdb::gpu::{GpuHasher, MultiGpuHasher, NodeHashJob};
     use super::*;
 
     macro_rules! gpu_or_skip {
@@ -1354,7 +1354,7 @@ fn test_batch_hash_cpu_thread_safety() {
 
 #[test]
 fn test_codec_encode_decode_i64() {
-    use qmdb::utils::codec::{decode_le_i64, encode_le_i64};
+    use kyumdb::utils::codec::{decode_le_i64, encode_le_i64};
     for &val in &[0i64, 1, -1, i64::MAX, i64::MIN, 42, -42, 0x7FFF_FFFF_FFFF_FFFF] {
         let encoded = encode_le_i64(val);
         let decoded = decode_le_i64(&encoded);
@@ -1364,7 +1364,7 @@ fn test_codec_encode_decode_i64() {
 
 #[test]
 fn test_codec_encode_decode_u64() {
-    use qmdb::utils::codec::{decode_le_u64, encode_le_u64};
+    use kyumdb::utils::codec::{decode_le_u64, encode_le_u64};
     for &val in &[0u64, 1, u64::MAX, 42, 0xDEAD_BEEF, 0xFFFF_FFFF_FFFF_FFFF] {
         let encoded = encode_le_u64(val);
         let decoded = decode_le_u64(&encoded);
@@ -1378,7 +1378,7 @@ fn test_codec_encode_decode_u64() {
 
 #[test]
 fn test_shortlist_basic() {
-    use qmdb::utils::shortlist::ShortList;
+    use kyumdb::utils::shortlist::ShortList;
     let mut sl = ShortList::new();
     sl.append(10);
     sl.append(20);
@@ -1391,7 +1391,7 @@ fn test_shortlist_basic() {
 
 #[test]
 fn test_shortlist_clear() {
-    use qmdb::utils::shortlist::ShortList;
+    use kyumdb::utils::shortlist::ShortList;
     let mut sl = ShortList::new();
     sl.append(1);
     sl.append(2);
@@ -1401,7 +1401,7 @@ fn test_shortlist_clear() {
 
 #[test]
 fn test_shortlist_dedup() {
-    use qmdb::utils::shortlist::ShortList;
+    use kyumdb::utils::shortlist::ShortList;
     let mut sl = ShortList::new();
     sl.append(42);
     sl.append(42); // duplicate
@@ -1410,7 +1410,7 @@ fn test_shortlist_dedup() {
 
 #[test]
 fn test_shortlist_contains() {
-    use qmdb::utils::shortlist::ShortList;
+    use kyumdb::utils::shortlist::ShortList;
     let mut sl = ShortList::new();
     sl.append(100);
     sl.append(200);
@@ -1530,7 +1530,7 @@ fn test_hash_output_uniform_byte_distribution() {
 #[test]
 fn test_entry_buffer_start_at_nonzero() {
     let start = 65536i64;
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(start, BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(start, BIG_BUF_SIZE);
     let entry = make_entry(b"key", b"value", 1);
     let pos = writer.append(&entry, &[]);
     assert_eq!(pos, start);
@@ -1538,7 +1538,7 @@ fn test_entry_buffer_start_at_nonzero() {
 
 #[test]
 fn test_entry_buffer_deactivated_sns() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let entry = make_entry(b"key", b"value", 100);
     let dsn_list = vec![1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let pos = writer.append(&entry, &dsn_list);
@@ -1547,7 +1547,7 @@ fn test_entry_buffer_deactivated_sns() {
 
 #[test]
 fn test_entry_buffer_large_value() {
-    let (mut writer, _reader) = qmdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
+    let (mut writer, _reader) = kyumdb::entryfile::entrybuffer::new(0, 3 * BIG_BUF_SIZE);
     let value = vec![0xAB; 50000]; // Large but within BIG_BUF_SIZE
     let entry = make_entry(b"k", &value, 1);
     let pos = writer.append(&entry, &[]);
@@ -1868,7 +1868,7 @@ fn test_zero_hash32_constant_is_all_zeros() {
 
 #[test]
 fn test_entry_buffer_write_read_single_small() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let entry = make_entry(b"k", b"v", 1);
     let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
     writer.append(&entry, &[]);
@@ -1885,7 +1885,7 @@ fn test_entry_buffer_write_read_single_small() {
 
 #[test]
 fn test_entry_buffer_write_read_ten_entries() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
     for i in 0u64..10 {
         let entry = make_entry(b"key_common", b"value_common", i);
@@ -1904,7 +1904,7 @@ fn test_entry_buffer_write_read_ten_entries() {
 
 #[test]
 fn test_entry_buffer_roundtrip_key_value() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let key = b"roundtrip_key";
     let value = b"roundtrip_value_content";
     let entry = Entry {
@@ -1937,7 +1937,7 @@ fn test_entry_buffer_roundtrip_key_value() {
 
 #[test]
 fn test_entry_buffer_end_block_extra_info_roundtrip() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
     let entry = make_entry(b"k", b"v", 1);
     writer.append(&entry, &[]);
@@ -1957,7 +1957,7 @@ fn test_entry_buffer_end_block_extra_info_roundtrip() {
 
 #[test]
 fn test_entry_buffer_multiple_blocks() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
 
     // Block 1
@@ -1991,7 +1991,7 @@ fn test_entry_buffer_multiple_blocks() {
 
 #[test]
 fn test_entry_buffer_deactivated_sns_roundtrip() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let entry = make_entry(b"key", b"value", 100);
     let dsn_list = [10u64, 20, 30, 40];
     let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
@@ -2016,7 +2016,7 @@ fn test_entry_buffer_deactivated_sns_roundtrip() {
 
 #[test]
 fn test_entry_buffer_start_pos_nonzero_offset() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let start = 1024i64;
     let (mut writer, mut reader) = entrybuffer::new(start, BIG_BUF_SIZE);
     writer.append(&make_entry(b"key", b"val", 5), &[]);
@@ -2033,7 +2033,7 @@ fn test_entry_buffer_start_pos_nonzero_offset() {
 
 #[test]
 fn test_entry_buffer_50_entries() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let n = 50;
     let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
     for i in 0..n {
@@ -2078,7 +2078,7 @@ fn test_entry_dump_basic_fields() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     assert_eq!(ebz.key(), key);
     assert_eq!(ebz.value(), value);
     assert_eq!(ebz.next_key_hash(), &nkh);
@@ -2099,7 +2099,7 @@ fn test_entry_dump_zero_length_value() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     assert_eq!(ebz.value().len(), 0);
 }
 
@@ -2115,7 +2115,7 @@ fn test_entry_dump_version_negative() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     assert_eq!(ebz.version(), -1);
 }
 
@@ -2131,7 +2131,7 @@ fn test_entry_dump_max_serial_number() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     assert_eq!(ebz.serial_number(), u64::MAX);
 }
 
@@ -2142,7 +2142,7 @@ fn test_entry_dump_single_deactivated_sn() {
     let total = entry.get_serialized_len(1);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &dsn);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     assert_eq!(ebz.dsn_count(), 1);
     assert_eq!(ebz.get_deactived_sn(0), 999);
 }
@@ -2154,7 +2154,7 @@ fn test_entry_dump_five_deactivated_sns() {
     let total = entry.get_serialized_len(5);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &dsn);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     assert_eq!(ebz.dsn_count(), 5);
     for i in 0..5 {
         assert_eq!(ebz.get_deactived_sn(i), (i + 1) as u64);
@@ -2168,7 +2168,7 @@ fn test_entry_dsn_iter_yields_all() {
     let total = entry.get_serialized_len(3);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &dsn);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     let items: Vec<(usize, u64)> = ebz.dsn_iter().collect();
     assert_eq!(items, vec![(0, 100), (1, 200), (2, 300)]);
 }
@@ -2186,7 +2186,7 @@ fn test_entry_key_hash_with_value_is_sha256_of_key() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     let expected: [u8; 32] = Sha256::digest(key).into();
     assert_eq!(ebz.key_hash(), expected);
 }
@@ -2207,7 +2207,7 @@ fn test_entry_key_hash_with_empty_value_uses_first_two_bytes() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     let kh = ebz.key_hash();
     assert_eq!(kh[0], 0x12);
     assert_eq!(kh[1], 0x34);
@@ -2241,7 +2241,7 @@ fn test_entry_payload_len() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     // payload_len should be <= total len
     assert!(ebz.payload_len() <= total);
     assert!(ebz.payload_len() > 0);
@@ -2262,7 +2262,7 @@ fn test_entry_from_bz_roundtrip() {
     let total = original.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     original.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     let reconstructed = Entry::from_bz(&ebz);
     assert_eq!(reconstructed.key, key);
     assert_eq!(reconstructed.value, value);
@@ -2302,7 +2302,7 @@ fn test_active_bits_set_first_bit() {
 fn test_active_bits_set_last_valid_bit() {
     let mut bits = ActiveBits::new();
     // The valid range is 0..=2047 (LEAF_COUNT_IN_TWIG - 1)
-    let last = qmdb::def::LEAF_COUNT_IN_TWIG - 1; // 2047
+    let last = kyumdb::def::LEAF_COUNT_IN_TWIG - 1; // 2047
     bits.set_bit(last);
     assert!(bits.get_bit(last));
 }
@@ -2374,7 +2374,7 @@ fn test_active_bits_get_bits_page_boundaries() {
 
 #[test]
 fn test_twig_new_all_zero() {
-    use qmdb::merkletree::twig::Twig;
+    use kyumdb::merkletree::twig::Twig;
     let t = Twig::new();
     for i in 0..4 {
         assert_eq!(t.active_bits_mtl1[i], [0u8; 32]);
@@ -2389,7 +2389,7 @@ fn test_twig_new_all_zero() {
 
 #[test]
 fn test_twig_default_same_as_new() {
-    use qmdb::merkletree::twig::Twig;
+    use kyumdb::merkletree::twig::Twig;
     let t1 = Twig::new();
     let t2 = Twig::default();
     assert_eq!(t1.active_bits_mtl3, t2.active_bits_mtl3);
@@ -2398,7 +2398,7 @@ fn test_twig_default_same_as_new() {
 
 #[test]
 fn test_twig_sync_top_deterministic() {
-    use qmdb::merkletree::twig::Twig;
+    use kyumdb::merkletree::twig::Twig;
     let mut t1 = Twig::new();
     let mut t2 = Twig::new();
     t1.left_root = [0xABu8; 32];
@@ -2413,7 +2413,7 @@ fn test_twig_sync_top_deterministic() {
 
 #[test]
 fn test_twig_sync_l3_non_zero() {
-    use qmdb::merkletree::twig::Twig;
+    use kyumdb::merkletree::twig::Twig;
     let mut t = Twig::new();
     t.active_bits_mtl2[0] = [0x01u8; 32];
     t.active_bits_mtl2[1] = [0x02u8; 32];
@@ -2433,7 +2433,7 @@ fn test_null_twig_active_bits_mtl3_non_zero() {
 
 #[test]
 fn test_sync_mtree_single_leaf_range() {
-    use qmdb::merkletree::twig::sync_mtree;
+    use kyumdb::merkletree::twig::sync_mtree;
     // Just verify it doesn't panic for a small range
     let mut mt: Vec<[u8; 32]> = vec![[0u8; 32]; 4096];
     // copy a leaf
@@ -2446,7 +2446,7 @@ fn test_sync_mtree_single_leaf_range() {
 
 #[test]
 fn test_sync_mtree_matches_hash2() {
-    use qmdb::merkletree::twig::sync_mtree;
+    use kyumdb::merkletree::twig::sync_mtree;
     let left = [0x11u8; 32];
     let right = [0x22u8; 32];
     let mut mt = vec![[0u8; 32]; 4096];
@@ -2459,7 +2459,7 @@ fn test_sync_mtree_matches_hash2() {
 
 #[test]
 fn test_null_mt_for_twig_root_non_zero() {
-    use qmdb::merkletree::twig::NULL_MT_FOR_TWIG;
+    use kyumdb::merkletree::twig::NULL_MT_FOR_TWIG;
     // The root at index 1 should not be zero
     assert_ne!(NULL_MT_FOR_TWIG[1], [0u8; 32]);
 }
@@ -2487,8 +2487,8 @@ fn test_changeset_run_all_empty() {
 fn test_changeset_add_and_run_all() {
     let mut cs = ChangeSet::new();
     let kh = [0u8; 32];
-    cs.add_op(qmdb::def::OP_READ, 0, &kh, b"key1", b"val1", None);
-    cs.add_op(qmdb::def::OP_WRITE, 0, &kh, b"key2", b"val2", None);
+    cs.add_op(kyumdb::def::OP_READ, 0, &kh, b"key1", b"val1", None);
+    cs.add_op(kyumdb::def::OP_WRITE, 0, &kh, b"key2", b"val2", None);
     let mut count = 0;
     cs.run_all(|_, _, _, _, _| { count += 1; });
     assert_eq!(count, 2);
@@ -2499,7 +2499,7 @@ fn test_changeset_run_in_shard_empty_shard() {
     let mut cs = ChangeSet::new();
     let kh = [0xFFu8; 32];
     // Add to shard 15
-    cs.add_op(qmdb::def::OP_CREATE, 15, &kh, b"k", b"v", None);
+    cs.add_op(kyumdb::def::OP_CREATE, 15, &kh, b"k", b"v", None);
     cs.sort();
     let mut count = 0;
     cs.run_in_shard(0, |_, _, _, _, _| { count += 1; });
@@ -2511,8 +2511,8 @@ fn test_changeset_run_in_shard_correct_shard() {
     let mut cs = ChangeSet::new();
     let kh0 = [0x00u8; 32]; // shard 0
     let kh15 = [0xFFu8; 32]; // shard 15
-    cs.add_op(qmdb::def::OP_CREATE, 0, &kh0, b"ka", b"va", None);
-    cs.add_op(qmdb::def::OP_CREATE, 15, &kh15, b"kb", b"vb", None);
+    cs.add_op(kyumdb::def::OP_CREATE, 0, &kh0, b"ka", b"va", None);
+    cs.add_op(kyumdb::def::OP_CREATE, 15, &kh15, b"kb", b"vb", None);
     cs.sort();
 
     let mut shard0_count = 0;
@@ -2529,8 +2529,8 @@ fn test_changeset_sort_by_shard_then_key_hash() {
     let kh_low = [0x00u8; 32];
     let kh_high = [0xFFu8; 32];
     // Add out of order
-    cs.add_op(qmdb::def::OP_READ, 0, &kh_high, b"k2", b"v2", None);
-    cs.add_op(qmdb::def::OP_READ, 0, &kh_low, b"k1", b"v1", None);
+    cs.add_op(kyumdb::def::OP_READ, 0, &kh_high, b"k2", b"v2", None);
+    cs.add_op(kyumdb::def::OP_READ, 0, &kh_low, b"k1", b"v1", None);
     cs.sort();
     // Both ops should be in shard 0 - verify via run_in_shard
     let mut seen_keys = Vec::new();
@@ -2555,10 +2555,10 @@ fn test_changeset_op_count_empty() {
 fn test_changeset_op_count_after_sort() {
     let mut cs = ChangeSet::new();
     for i in 0..5u8 {
-        cs.add_op(qmdb::def::OP_READ, 3, &[i; 32], b"k", b"v", None);
+        cs.add_op(kyumdb::def::OP_READ, 3, &[i; 32], b"k", b"v", None);
     }
     for i in 0..3u8 {
-        cs.add_op(qmdb::def::OP_READ, 7, &[i; 32], b"k", b"v", None);
+        cs.add_op(kyumdb::def::OP_READ, 7, &[i; 32], b"k", b"v", None);
     }
     cs.sort();
     assert_eq!(cs.op_count_in_shard(3), 5);
@@ -2571,7 +2571,7 @@ fn test_changeset_add_op_with_old_value() {
     let mut cs = ChangeSet::new();
     let kh = [0x42u8; 32];
     cs.add_op_with_old_value(
-        qmdb::def::OP_WRITE,
+        kyumdb::def::OP_WRITE,
         4,
         &kh,
         b"key",
@@ -2580,17 +2580,17 @@ fn test_changeset_add_op_with_old_value() {
         None,
     );
     assert_eq!(cs.op_list.len(), 1);
-    assert_eq!(cs.op_list[0].op_type, qmdb::def::OP_WRITE);
+    assert_eq!(cs.op_list[0].op_type, kyumdb::def::OP_WRITE);
 }
 
 #[test]
 fn test_changeset_apply_op_in_range_correct_data() {
     let mut cs = ChangeSet::new();
     let kh = [0x10u8; 32];
-    cs.add_op(qmdb::def::OP_DELETE, 1, &kh, b"del_key", b"del_val", None);
+    cs.add_op(kyumdb::def::OP_DELETE, 1, &kh, b"del_key", b"del_val", None);
     let mut keys_seen = Vec::new();
     cs.apply_op_in_range(|op_type, _kh, k, _v, _ov, _rec| {
-        assert_eq!(op_type, qmdb::def::OP_DELETE);
+        assert_eq!(op_type, kyumdb::def::OP_DELETE);
         keys_seen.push(k.to_vec());
     });
     assert_eq!(keys_seen, vec![b"del_key".to_vec()]);
@@ -2843,7 +2843,7 @@ fn test_entry_large_value_roundtrip() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     assert_eq!(ebz.key(), key);
     assert_eq!(ebz.value(), &value[..]);
     assert_eq!(ebz.version(), 100);
@@ -2864,7 +2864,7 @@ fn test_hash2_single_byte_inputs() {
 fn test_entry_null_known_version() {
     let mut buf = [0u8; ENTRY_BASE_LENGTH + 48];
     let ne = entry::null_entry(&mut buf);
-    assert_eq!(ne.version(), qmdb::def::NULL_ENTRY_VERSION);
+    assert_eq!(ne.version(), kyumdb::def::NULL_ENTRY_VERSION);
     assert_eq!(ne.serial_number(), u64::MAX);
 }
 
@@ -2895,7 +2895,7 @@ fn test_entry_sentry_shard_0_sn_1() {
 fn test_changeset_multiple_ops_per_shard() {
     let mut cs = ChangeSet::new();
     for i in 0u8..10 {
-        cs.add_op(qmdb::def::OP_READ, 5, &[i; 32], b"k", b"v", None);
+        cs.add_op(kyumdb::def::OP_READ, 5, &[i; 32], b"k", b"v", None);
     }
     cs.sort();
     assert_eq!(cs.op_count_in_shard(5), 10);
@@ -2948,7 +2948,7 @@ fn test_batch_hash_cpu_output_length_matches_input() {
 
 #[test]
 fn test_entry_buffer_write_then_read_verifies_content() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let key = b"verification_key";
     let value = b"verification_value";
     let sn = 42u64;
@@ -2982,14 +2982,14 @@ fn test_entry_buffer_write_then_read_verifies_content() {
 fn test_changeset_print_does_not_panic() {
     let mut cs = ChangeSet::new();
     let kh = [0x01u8; 32];
-    cs.add_op(qmdb::def::OP_CREATE, 0, &kh, b"key", b"val", None);
+    cs.add_op(kyumdb::def::OP_CREATE, 0, &kh, b"key", b"val", None);
     // print() should not panic (it prints to stdout)
     cs.print();
 }
 
 #[test]
 fn test_entry_vec_roundtrip_to_from_bytes() {
-    use qmdb::entryfile::entry::EntryVec;
+    use kyumdb::entryfile::entry::EntryVec;
     let mut ev = EntryVec::new();
     let kh = hash(b"test_key_for_ev");
     let entry = Entry {
@@ -3007,7 +3007,7 @@ fn test_entry_vec_roundtrip_to_from_bytes() {
 
 #[test]
 fn test_entry_vec_new_has_shard_count_pos_lists() {
-    use qmdb::entryfile::entry::EntryVec;
+    use kyumdb::entryfile::entry::EntryVec;
     let ev = EntryVec::new();
     assert_eq!(ev.total_bytes(), 0);
 }
@@ -3028,41 +3028,41 @@ fn test_big_buf_size_is_64kb() {
 
 #[test]
 fn test_leaf_count_in_twig_is_2048() {
-    assert_eq!(qmdb::def::LEAF_COUNT_IN_TWIG, 2048);
+    assert_eq!(kyumdb::def::LEAF_COUNT_IN_TWIG, 2048);
 }
 
 #[test]
 fn test_twig_shift_is_11() {
-    assert_eq!(qmdb::def::TWIG_SHIFT, 11);
+    assert_eq!(kyumdb::def::TWIG_SHIFT, 11);
 }
 
 #[test]
 fn test_null_entry_version_is_negative_2() {
-    assert_eq!(qmdb::def::NULL_ENTRY_VERSION, -2);
+    assert_eq!(kyumdb::def::NULL_ENTRY_VERSION, -2);
 }
 
 #[test]
 fn test_op_constants_are_distinct() {
-    assert_ne!(qmdb::def::OP_READ, qmdb::def::OP_WRITE);
-    assert_ne!(qmdb::def::OP_WRITE, qmdb::def::OP_CREATE);
-    assert_ne!(qmdb::def::OP_CREATE, qmdb::def::OP_DELETE);
-    assert_ne!(qmdb::def::OP_READ, qmdb::def::OP_DELETE);
+    assert_ne!(kyumdb::def::OP_READ, kyumdb::def::OP_WRITE);
+    assert_ne!(kyumdb::def::OP_WRITE, kyumdb::def::OP_CREATE);
+    assert_ne!(kyumdb::def::OP_CREATE, kyumdb::def::OP_DELETE);
+    assert_ne!(kyumdb::def::OP_READ, kyumdb::def::OP_DELETE);
 }
 
 #[test]
 fn test_first_level_above_twig_is_13() {
-    assert_eq!(qmdb::def::FIRST_LEVEL_ABOVE_TWIG, 13);
+    assert_eq!(kyumdb::def::FIRST_LEVEL_ABOVE_TWIG, 13);
 }
 
 #[test]
 fn test_twig_root_level_is_12() {
-    assert_eq!(qmdb::def::TWIG_ROOT_LEVEL, 12);
+    assert_eq!(kyumdb::def::TWIG_ROOT_LEVEL, 12);
 }
 
 #[test]
 fn test_sentry_count() {
     // SENTRY_COUNT = (1<<16) / SHARD_COUNT = 65536 / 16 = 4096
-    assert_eq!(qmdb::def::SENTRY_COUNT, 4096);
+    assert_eq!(kyumdb::def::SENTRY_COUNT, 4096);
 }
 
 // ============================================================
@@ -3116,7 +3116,7 @@ fn test_hash2x_exchange_true_reverses() {
 
 #[test]
 fn test_batch_vs_sequential_at_twig_root_level() {
-    let level = qmdb::def::TWIG_ROOT_LEVEL as u8;
+    let level = kyumdb::def::TWIG_ROOT_LEVEL as u8;
     let n = 8;
     let lefts: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 100)).collect();
     let rights: Vec<[u8; 32]> = (0..n).map(|i| pseudo_random_hash(i as u64 * 100 + 50)).collect();
@@ -3134,7 +3134,7 @@ fn test_batch_vs_sequential_at_twig_root_level() {
 
 #[test]
 fn test_entry_buffer_writer_curr_buf_not_none() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let (writer, _reader) = entrybuffer::new(0, BIG_BUF_SIZE);
     // Verify writer was constructed correctly - it holds an Arc to the entry buffer
     assert!(std::sync::Arc::strong_count(&writer.entry_buffer) >= 1);
@@ -3142,7 +3142,7 @@ fn test_entry_buffer_writer_curr_buf_not_none() {
 
 #[test]
 fn test_entry_buffer_empty_block() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let (mut writer, mut reader) = entrybuffer::new(0, BIG_BUF_SIZE);
     writer.end_block(0, 0, 0);
     // An empty block: read_next_entry should immediately return end-of-block
@@ -3156,7 +3156,7 @@ fn test_entry_buffer_empty_block() {
 
 #[test]
 fn test_entry_buffer_get_entry_bz_at_past_end_panics() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let (mut writer, _reader) = entrybuffer::new(0, BIG_BUF_SIZE);
     let entry = make_entry(b"k", b"v", 1);
     writer.append(&entry, &[]);
@@ -3207,13 +3207,13 @@ fn test_hash2_different_data_lengths() {
 
 #[test]
 fn test_null_higher_tree_level_63_non_zero() {
-    use qmdb::merkletree::twig::NULL_NODE_IN_HIGHER_TREE;
+    use kyumdb::merkletree::twig::NULL_NODE_IN_HIGHER_TREE;
     assert_ne!(NULL_NODE_IN_HIGHER_TREE[63], [0u8; 32]);
 }
 
 #[test]
 fn test_null_higher_tree_known_value() {
-    use qmdb::merkletree::twig::NULL_NODE_IN_HIGHER_TREE;
+    use kyumdb::merkletree::twig::NULL_NODE_IN_HIGHER_TREE;
     assert_eq!(
         hex::encode(NULL_NODE_IN_HIGHER_TREE[63]),
         "c787c83f6f8402c636a2f48f1bf2c02ceb31ea5ccdd4bd9e6fe6efcc3031b640"
@@ -3235,7 +3235,7 @@ fn test_entry_bz_hash_uses_payload_not_full_bytes() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let ebz = qmdb::entryfile::entry::EntryBz { bz: &buf[..total] };
+    let ebz = kyumdb::entryfile::entry::EntryBz { bz: &buf[..total] };
     let payload = ebz.payload_len();
     let expected: [u8; 32] = Sha256::digest(&buf[..payload]).into();
     assert_eq!(ebz.hash(), expected);
@@ -3243,10 +3243,10 @@ fn test_entry_bz_hash_uses_payload_not_full_bytes() {
 
 #[test]
 fn test_changeset_add_op_rec() {
-    use qmdb::utils::OpRecord;
+    use kyumdb::utils::OpRecord;
     let mut cs = ChangeSet::new();
-    let mut rec = OpRecord::new(qmdb::def::OP_CREATE);
-    rec.shard_id = qmdb::utils::byte0_to_shard_id(hash(b"rec_key")[0]);
+    let mut rec = OpRecord::new(kyumdb::def::OP_CREATE);
+    rec.shard_id = kyumdb::utils::byte0_to_shard_id(hash(b"rec_key")[0]);
     rec.key = b"rec_key".to_vec();
     rec.value = b"rec_val".to_vec();
     cs.add_op_rec(rec);
@@ -3269,7 +3269,7 @@ fn test_entry_get_entry_len_matches_serialized_len() {
     let total = entry.get_serialized_len(0);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &[]);
-    let len_from_bz = qmdb::entryfile::entry::EntryBz::get_entry_len(&buf[..5]);
+    let len_from_bz = kyumdb::entryfile::entry::EntryBz::get_entry_len(&buf[..5]);
     assert_eq!(len_from_bz, total);
 }
 
@@ -3280,7 +3280,7 @@ fn test_entry_get_entry_len_with_dsn() {
     let total = entry.get_serialized_len(3);
     let mut buf = vec![0u8; total];
     entry.dump(&mut buf, &dsn);
-    let len_from_bz = qmdb::entryfile::entry::EntryBz::get_entry_len(&buf[..5]);
+    let len_from_bz = kyumdb::entryfile::entry::EntryBz::get_entry_len(&buf[..5]);
     assert_eq!(len_from_bz, total);
 }
 
@@ -3291,7 +3291,7 @@ fn test_entry_get_entry_len_with_dsn() {
 #[cfg(feature = "cuda")]
 #[test]
 fn test_gpu_hasher_init() {
-    use qmdb::gpu::GpuHasher;
+    use kyumdb::gpu::GpuHasher;
     let result = GpuHasher::new(1000);
     // Should not panic; may succeed or fail gracefully
     match result {
@@ -3303,8 +3303,8 @@ fn test_gpu_hasher_init() {
 #[cfg(feature = "cuda")]
 #[test]
 fn test_batch_node_hash_gpu_matches_cpu() {
-    use qmdb::gpu::{GpuHasher, NodeHashJob};
-    use qmdb::utils::hasher::batch_node_hash_gpu;
+    use kyumdb::gpu::{GpuHasher, NodeHashJob};
+    use kyumdb::utils::hasher::batch_node_hash_gpu;
     if let Ok(gpu) = GpuHasher::new(10) {
         let jobs: Vec<NodeHashJob> = (0..5).map(|i| NodeHashJob {
             level: i as u8,
@@ -3326,7 +3326,7 @@ fn test_batch_node_hash_gpu_matches_cpu() {
 
 #[test]
 fn test_entry_buffer_100_entries_roundtrip() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let n = 100u64;
     let (mut writer, mut reader) = entrybuffer::new(0, 4 * BIG_BUF_SIZE);
     for i in 0..n {
@@ -3357,7 +3357,7 @@ fn test_entry_buffer_100_entries_roundtrip() {
 
 #[test]
 fn test_entry_buffer_entries_with_increasing_sns() {
-    use qmdb::entryfile::entrybuffer;
+    use kyumdb::entryfile::entrybuffer;
     let n = 20u64;
     let (mut writer, mut reader) = entrybuffer::new(0, 4 * BIG_BUF_SIZE);
     for i in 0..n {

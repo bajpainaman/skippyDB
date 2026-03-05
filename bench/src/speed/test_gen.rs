@@ -1,6 +1,6 @@
 use byteorder::{BigEndian, ByteOrder};
 use parking_lot::RwLock;
-use qmdb::{
+use kyumdb::{
     def::{OP_CREATE, OP_DELETE, OP_READ, OP_WRITE},
     test_helper::{RandSrc, SimpleTask},
     utils::{byte0_to_shard_id, changeset::ChangeSet, hasher},

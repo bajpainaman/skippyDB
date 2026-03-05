@@ -1,9 +1,8 @@
-use super::tree::{NodePos, Tree};
+use super::tree::{NodePos, NodeShard, Tree};
 use super::twig::ActiveBits;
 use super::twig::{self, TwigMT};
 use crate::def::{FIRST_LEVEL_ABOVE_TWIG, MAX_UPPER_LEVEL, NODE_SHARD_COUNT, TWIG_SHARD_COUNT};
 use crate::utils::hasher;
-use std::collections::HashMap;
 
 pub fn check_mt(mt: &TwigMT) {
     let mut level = 10;
@@ -36,13 +35,18 @@ pub fn hash_equal(tag: &str, a: &[u8], b: &[u8]) {
 pub fn check_upper_nodes(tree: &Tree) {
     for k in 0..MAX_UPPER_LEVEL {
         for s in 0..NODE_SHARD_COUNT {
-            check_upper_nodes_internal(tree, &tree.upper_tree.nodes[k][s]);
+            check_upper_nodes_internal(tree, &tree.upper_tree.nodes[k][s], s, k);
         }
     }
 }
 
-fn check_upper_nodes_internal(tree: &Tree, nodes: &HashMap<NodePos, [u8; 32]>) {
-    for (pos, parent_hash) in nodes {
+fn check_upper_nodes_internal(
+    tree: &Tree,
+    nodes: &NodeShard,
+    shard_id: usize,
+    level_idx: usize,
+) {
+    for (pos, parent_hash) in nodes.iter_with_context(shard_id, level_idx) {
         let level = pos.level();
         let n = pos.nth();
         let mut left_child = [0; 32];
