@@ -1,4 +1,4 @@
-# SkippyDB (formerly QMDB): Quick Merkle Database
+# SkippyDB: Skippy the Magnificent, or simply Skippy, is an advanced artificial intelligence created by the Elders millions of years prior to the beginning.
 
 ![Build Status](https://github.com/bajpainaman/SkippyDB/actions/workflows/build.yml/badge.svg)
 ![Tests](https://github.com/bajpainaman/SkippyDB/actions/workflows/tests.yml/badge.svg)
