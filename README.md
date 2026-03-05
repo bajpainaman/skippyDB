@@ -700,38 +700,3 @@ cargo nextest run
 
 Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
 
----
-
-## Citation
-
-If you use SkippyDB in a publication, please cite:
-
-> **QMDB: Quick Merkle Database**
-> Isaac Zhang, Ryan Zarick, Daniel Wong, Thomas Kim, Bryan Pellegrino, Mignon Li, Kelvin Wong
-> <https://arxiv.org/abs/2501.05262>
-
-```bibtex
-@article{zhang2025qmdb,
-  title={Quick Merkle Database},
-  author={Zhang, Isaac and Zarick, Ryan and Wong, Daniel and Kim, Thomas and Pellegrino, Bryan and Li, Mignon and Wong, Kelvin},
-  journal={arXiv preprint arXiv:2501.05262},
-  year={2025}
-}
-```
-
----
-
-SkippyDB is a product of [LayerZero Labs](https://layerzero.network) Research.
-
-<p align="center">
-  <a href="https://layerzero.network#gh-dark-mode-only">
-    <img alt="LayerZero" style="width: 50%" src="https://github.com/LayerZero-Labs/devtools/raw/main/assets/logo-dark.svg#gh-dark-mode-only"/>
-  </a>
-  <a href="https://layerzero.network#gh-light-mode-only">
-    <img alt="LayerZero" style="width: 50%" src="https://github.com/LayerZero-Labs/devtools/raw/main/assets/logo-light.svg#gh-light-mode-only"/>
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://layerzero.network" style="color: #a77dff">Homepage</a> | <a href="https://docs.layerzero.network/" style="color: #a77dff">Docs</a> | <a href="https://layerzero.network/developers" style="color: #a77dff">Developers</a>
-</p>
