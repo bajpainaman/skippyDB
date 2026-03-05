@@ -6,8 +6,8 @@ version = "0.3.0"
 license = "MIT OR Apache-2.0"
 description = "Head-prunable file."
 readme = "README.md"
-homepage = "https://github.com/qmdb/qmdb/tree/main/hpfile"
-repository = "https://github.com/qmdb/qmdb/tree/main/hpfile"
+homepage = "https://github.com/bajpainaman/skippyDB/tree/main/hpfile"
+repository = "https://github.com/bajpainaman/skippyDB/tree/main/hpfile"
 documentation = "https://docs.rs/hpfile"
 
 [dependencies]

@@ -721,17 +721,4 @@ If you use KyumDB in a publication, please cite:
 
 ---
 
-KyumDB is a product of [LayerZero Labs](https://layerzero.network) Research.
-
-<p align="center">
-  <a href="https://layerzero.network#gh-dark-mode-only">
-    <img alt="LayerZero" style="width: 50%" src="https://github.com/LayerZero-Labs/devtools/raw/main/assets/logo-dark.svg#gh-dark-mode-only"/>
-  </a>
-  <a href="https://layerzero.network#gh-light-mode-only">
-    <img alt="LayerZero" style="width: 50%" src="https://github.com/LayerZero-Labs/devtools/raw/main/assets/logo-light.svg#gh-light-mode-only"/>
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://layerzero.network" style="color: #a77dff">Homepage</a> | <a href="https://docs.layerzero.network/" style="color: #a77dff">Docs</a> | <a href="https://layerzero.network/developers" style="color: #a77dff">Developers</a>
-</p>
+SkippyDB is maintained by [Naman Bajpai](https://github.com/bajpainaman). Originally forked from [qmdb](https://github.com/LayerZero-Labs/qmdb).
