@@ -8,15 +8,15 @@ use bench::{
     speed::{db_backend, test_gen::TestGenV2},
 };
 
-use qmdb::def::IN_BLOCK_IDX_BITS;
-use qmdb::def::OP_CREATE;
-use qmdb::def::OP_DELETE;
-use qmdb::def::OP_READ;
-use qmdb::def::OP_WRITE;
-use qmdb::indexer::hybrid::index_cache::COUNTERS;
-use qmdb::test_helper::RandSrc;
-use qmdb::test_helper::SimpleTask;
-use qmdb::utils::{byte0_to_shard_id, changeset::ChangeSet, hasher};
+use kyumdb::def::IN_BLOCK_IDX_BITS;
+use kyumdb::def::OP_CREATE;
+use kyumdb::def::OP_DELETE;
+use kyumdb::def::OP_READ;
+use kyumdb::def::OP_WRITE;
+use kyumdb::indexer::hybrid::index_cache::COUNTERS;
+use kyumdb::test_helper::RandSrc;
+use kyumdb::test_helper::SimpleTask;
+use kyumdb::utils::{byte0_to_shard_id, changeset::ChangeSet, hasher};
 
 use byteorder::BigEndian;
 use byteorder::ByteOrder;

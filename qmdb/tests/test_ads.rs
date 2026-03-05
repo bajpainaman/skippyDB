@@ -1,12 +1,12 @@
 use hpfile::TempDir;
-use qmdb::config::Config;
-use qmdb::def::{IN_BLOCK_IDX_BITS, OP_CREATE};
-use qmdb::entryfile::EntryBz;
-use qmdb::seqads::{SeqAds, SeqAdsWrap};
-use qmdb::test_helper::SimpleTask;
-use qmdb::utils::changeset::ChangeSet;
-use qmdb::utils::{byte0_to_shard_id, hasher};
-use qmdb::{AdsCore, ADS};
+use kyumdb::config::Config;
+use kyumdb::def::{IN_BLOCK_IDX_BITS, OP_CREATE};
+use kyumdb::entryfile::EntryBz;
+use kyumdb::seqads::{SeqAds, SeqAdsWrap};
+use kyumdb::test_helper::SimpleTask;
+use kyumdb::utils::changeset::ChangeSet;
+use kyumdb::utils::{byte0_to_shard_id, hasher};
+use kyumdb::{AdsCore, ADS};
 use std::fs::remove_dir_all;
 
 #[cfg(not(feature = "tee_cipher"))]

@@ -1,11 +1,17 @@
 [package]
-name = "qmdb"
+name = "kyumdb"
 version = "0.2.0"
 edition = "2021"
-description = "A high-performance verifiable key-value store, designed to optimize blockchain state storage."
-repository = "https://github.com/LayerZero-Labs/qmdb"
+description = "A high-performance verifiable key-value store with SHA256 Merkle trees and optional CUDA GPU acceleration, designed for blockchain state storage."
+repository = "https://github.com/bajpainaman/kyumdb"
+homepage = "https://github.com/bajpainaman/kyumdb"
+documentation = "https://docs.rs/kyumdb"
 authors = ["LayerZero Labs Research"]
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["merkle-tree", "blockchain", "key-value-store", "gpu", "sha256"]
+categories = ["database", "cryptography"]
+publish = true
 
 
 [[example]]
@@ -31,14 +37,14 @@ parking_lot = { version = "0.12.1", features = ["arc_lock"] }
 blake2 = "0.10.6"
 serde = {version="1.0.210", features = ["derive"]}
 bincode = "1.3.3"
-hpfile = { path = "../hpfile" }
+hpfile = { version = "0.3", path = "../hpfile" }
 rs_merkle = "1.4"
 aes-gcm = "0.10.3"
 aead = "0.5.2"
 generic-array = "1.1.1"
 log = "0.4"
 cudarc = { version = "0.12", optional = true, features = ["cuda-12060"] }
-flash-map = { path = "../flash-map", optional = true, features = ["cuda", "cpu-fallback"] }
+flash-map = { version = "0.1", path = "../flash-map", optional = true, features = ["cuda", "cpu-fallback"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

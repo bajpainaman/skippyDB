@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-qmdb = { path = "../qmdb" }
+kyumdb = { path = "../qmdb" }
 reth-libmdbx = { tag = "v1.1.2", git = "https://github.com/paradigmxyz/reth.git"}
 byteorder = "1.5.0"
 threadpool = "1.8.1"
@@ -34,4 +34,4 @@ name = "speed"
 default = []
 use_mdbx = []
 use_rocksdb = []
-directio = ["qmdb/directio"]
+directio = ["kyumdb/directio"]

@@ -1,3 +1,39 @@
+//! # KyumDB
+//!
+//! A high-performance verifiable key-value store with SHA256 Merkle trees,
+//! designed for blockchain state storage. Supports sharded append-only entry
+//! files, incremental Merkle tree synchronization, and optional CUDA GPU
+//! acceleration for batch hashing.
+//!
+//! ## Key Modules
+//!
+//! | Module | Description |
+//! |--------|-------------|
+//! | [`merkletree`] | Incremental SHA256 Merkle tree with twig-based structure |
+//! | [`entryfile`] | Append-only entry storage with sharded files |
+//! | [`indexer`] | Key-to-position index for entry lookup |
+//! | [`flusher`] | Block-level flush pipeline (CPU or GPU) |
+//! | [`compactor`] | Background compaction of inactive entries |
+//! | [`gpu`] | CUDA GPU-accelerated batch SHA256 hashing *(requires `cuda` feature)* |
+//! | [`seqads`] | Sequential authenticated data structure operations |
+//! | [`stateless`] | Stateless proof generation and verification |
+//!
+//! ## Feature Flags
+//!
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `default` | Includes jemalloc allocator |
+//! | `cuda` | CUDA GPU-accelerated SHA256 batch hashing |
+//! | `directio` | Linux io_uring direct I/O |
+//! | `hpfile_all_in_mem` | Keep heap files in memory |
+//! | `tee_cipher` | AES-GCM encryption at rest |
+//!
+//! ## GPU Acceleration
+//!
+//! With `--features cuda`, batch Merkle hash operations are dispatched to CUDA
+//! cores. See the [`gpu`] module and the
+//! [GPU Integration Guide](https://github.com/bajpainaman/kyumdb/blob/main/docs/gpu-integration-guide.md).
+
 extern crate core;
 pub mod compactor;
 pub mod config;

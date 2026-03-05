@@ -1,5 +1,5 @@
 use byteorder::{BigEndian, ByteOrder};
-use qmdb::utils::hasher;
+use kyumdb::utils::hasher;
 
 #[derive(Debug, Clone)]
 pub struct ShuffleParam {

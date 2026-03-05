@@ -1,15 +1,15 @@
 use byteorder::{ByteOrder, LittleEndian};
-use qmdb::config::Config;
-use qmdb::def::{
+use kyumdb::config::Config;
+use kyumdb::def::{
     DEFAULT_ENTRY_SIZE, IN_BLOCK_IDX_BITS, OP_CREATE, OP_DELETE, OP_WRITE, SENTRY_COUNT,
     SHARD_COUNT,
 };
-use qmdb::entryfile::{
+use kyumdb::entryfile::{
     entry::{entry_to_vec, sentry_entry},
     Entry, EntryBz,
 };
-use qmdb::utils::hasher::hash;
-use qmdb::utils::{byte0_to_shard_id, OpRecord};
+use kyumdb::utils::hasher::hash;
+use kyumdb::utils::{byte0_to_shard_id, OpRecord};
 use rocksdb::{Direction, IteratorMode, WriteBatch, WriteBatchWithTransaction, WriteOptions, DB};
 use std::path::Path;
 use std::sync::mpsc::SyncSender;
@@ -518,7 +518,7 @@ mod tests {
 
     use serial_test::serial;
 
-    use qmdb::test_helper::TempDir;
+    use kyumdb::test_helper::TempDir;
 
     use super::*;
     use std::sync::mpsc::sync_channel;

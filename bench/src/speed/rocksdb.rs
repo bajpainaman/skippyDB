@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 use parking_lot::RwLock;
-use qmdb::{
+use kyumdb::{
     def::{OP_CREATE, OP_DELETE, OP_READ, OP_WRITE},
     tasks::Task,
     test_helper::SimpleTask,

@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread};
 
 use parking_lot::RwLock;
-use qmdb::{
+use kyumdb::{
     config::Config,
     def::{ENTRY_BASE_LENGTH, IN_BLOCK_IDX_BITS, TWIG_MASK},
     entryfile::entry,

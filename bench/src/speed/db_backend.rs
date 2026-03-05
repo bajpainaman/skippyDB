@@ -1,5 +1,5 @@
 use parking_lot::RwLock;
-use qmdb::test_helper::SimpleTask;
+use kyumdb::test_helper::SimpleTask;
 use std::path::Path;
 
 #[cfg(feature = "use_mdbx")]
