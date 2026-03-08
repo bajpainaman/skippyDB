@@ -1,3 +1,4 @@
+use log::info;
 use crate::utils::shortlist::ShortList;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -34,7 +35,7 @@ impl Counters {
         let n_wo = self.none_wo.load(Ordering::SeqCst);
         let p_num = self.page_num.load(Ordering::SeqCst);
         let wr_bytes = self.wr_bytes.load(Ordering::SeqCst);
-        println!(
+        info!(
             "hit_wi={} miss_wi={} none_wi={} hit_wo={} miss_wo={} none_wo={} page_num={} wr={}",
             h_wi, m_wi, n_wi, h_wo, m_wo, n_wo, p_num, wr_bytes,
         );

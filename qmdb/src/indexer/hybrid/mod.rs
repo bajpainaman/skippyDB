@@ -93,7 +93,7 @@ impl Merger {
                     self.f_wr.load_file(new_file);
                 }
 
-                let mut unit = self.hi_arc.units[idx].lock().unwrap();
+                let mut unit = self.hi_arc.units[idx].lock().expect("lock poisoned: merger unit mutex");
                 unit.merge(&mut self.f_rd, &mut self.f_wr, idx);
             }
             self.file_num += 1;
@@ -130,9 +130,9 @@ impl HybridIndexer {
 
     fn _new(dir: String, cipher: Arc<Option<Aes256Gcm>>) -> Self {
         if Path::new(&dir).exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
+            std::fs::remove_dir_all(&dir).expect("I/O failed: remove old hybrid indexer directory");
         }
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(&dir).expect("I/O failed: create hybrid indexer directory");
         let mut files = Vec::with_capacity(TEMP_FILE_COUNT);
         for i in 0..TEMP_FILE_COUNT {
             let f = new_temp_file(&dir, 0, i);
@@ -167,11 +167,11 @@ impl HybridIndexer {
         let unit_start = shard_id * SHARD_DIV;
         let unit_end = unit_start + SHARD_DIV;
         let mut f_wr = {
-            let unit = self.units[unit_start].lock().unwrap();
+            let unit = self.units[unit_start].lock().expect("lock poisoned: unit mutex during dump_mem_to_file");
             FileWriter::new(unit.ifof.clone(), self.cipher.clone())
         };
         for idx in unit_start..unit_end {
-            let mut unit = self.units[idx].lock().unwrap();
+            let mut unit = self.units[idx].lock().expect("lock poisoned: unit mutex during dump_mem_to_file iter");
             if idx != 0 && idx % UNIT_GROUP_SIZE == 0 {
                 f_wr.load_file(unit.ifof.clone());
             }
@@ -214,7 +214,7 @@ impl HybridIndexer {
         //if k80[0]==0x81 && k80[1]==0x8b || k80[2]==0xa1 && k80[3]==0x9a || k80[0]==0x4c && k80[1]==0xe2 {
         //    println!("ADD_KV k80={} v_in={:#010x} sn={:#010x}", hex::encode(k80), v_in, sn);
         //}
-        let mut unit = self.units[idx].lock().unwrap();
+        let mut unit = self.units[idx].lock().expect("lock poisoned: unit mutex in add_kv");
         if v_in % 8 != 0 {
             panic!("value not 8x v_in={}", v_in);
         }
@@ -240,7 +240,7 @@ impl HybridIndexer {
         if self.initializing.load(Ordering::SeqCst) {
             panic!("Cannot erase_kv during initializing");
         }
-        let mut unit = self.units[idx].lock().unwrap();
+        let mut unit = self.units[idx].lock().expect("lock poisoned: unit mutex in erase_kv");
         if v_in % 8 != 0 {
             panic!("value not 8x");
         }
@@ -266,7 +266,7 @@ impl HybridIndexer {
         if self.initializing.load(Ordering::SeqCst) {
             panic!("Cannot change_kv during initializing");
         }
-        let mut unit = self.units[idx].lock().unwrap();
+        let mut unit = self.units[idx].lock().expect("lock poisoned: unit mutex in change_kv");
         if v_old % 8 != 0 {
             panic!("value not 8x");
         }
@@ -323,7 +323,7 @@ impl HybridIndexer {
         //    println!("FEV k80={}", hex::encode(k80));
         //}
         let (idx, k) = split_k80(k80);
-        let mut unit = self.units[idx].lock().unwrap();
+        let mut unit = self.units[idx].lock().expect("lock poisoned: unit mutex in _for_each_value");
         unit.for_each_value(height, warmup, k, k80, |v| access(v * 8));
     }
 
@@ -342,7 +342,7 @@ impl HybridIndexer {
         //    println!("FEA k80={}", hex::encode(k80));
         //}
         let (idx, k) = split_k80(k80);
-        let mut unit = self.units[idx].lock().unwrap();
+        let mut unit = self.units[idx].lock().expect("lock poisoned: unit mutex in _for_each_adjacent_value");
         let mut buf = [0u8; 10];
         buf[..].copy_from_slice(&k80[..10]);
         unit.for_each_adjacent_value(height, warmup, k, &buf, |k, v| access(k, v * 8));

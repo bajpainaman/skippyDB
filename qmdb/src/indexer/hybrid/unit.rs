@@ -1,3 +1,4 @@
+use log::debug;
 use crate::utils::shortlist::ShortList;
 use aes_gcm::Aes256Gcm;
 use byteorder::{BigEndian, ByteOrder};
@@ -169,7 +170,7 @@ impl Unit {
         if let Some(rset) = rv {
             if !rset.is_empty() {
                 for v in rset.iter() {
-                    println!("missed k80={} v={:#016x}", hex::encode(k80), v);
+                    debug!("missed k80={} v={:#016x}", hex::encode(k80), v);
                 }
                 panic!(
                     "missed some postions k80={} k={:#016x}",
@@ -215,7 +216,7 @@ impl Unit {
                 k80arr[..].copy_from_slice(&k80[..10]);
                 if !rset.remove(&(k80arr, v)) {
                     not_in_ref_fea = true;
-                    println!(
+                    debug!(
                         "NOT_IN_REF_FEA k80={} k={:#016x} v={:#016x}",
                         hex::encode(&k80[..]),
                         k,
@@ -327,7 +328,7 @@ impl Unit {
         if let Some(rset) = rv {
             if !rset.is_empty() {
                 for (k, v) in rset.iter() {
-                    println!(
+                    debug!(
                         "missed k80={} k={} v={:#016x}",
                         hex::encode(k80),
                         hex::encode(k),

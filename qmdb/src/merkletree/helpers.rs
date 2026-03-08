@@ -1,3 +1,4 @@
+use log::debug;
 use std::collections::HashMap;
 
 use crate::{
@@ -87,7 +88,7 @@ fn compare_tree_nodes(tree_a: &Tree, tree_b: &Tree) {
                 if tree_a.upper_tree.get_node(pos).unwrap()
                     != tree_b.upper_tree.get_node(pos).unwrap()
                 {
-                    println!("Different Hash {}-{}", pos.level(), pos.nth());
+                    debug!("Different Hash {}-{}", pos.level(), pos.nth());
                     all_same = false;
                 }
             }
@@ -158,7 +159,7 @@ fn compare_nodes(
                 let val_a = nodes_a[level][nth].get(&pos);
                 let val_b = nodes_b[level][nth].get(&pos);
                 if val_a != val_b {
-                    println!("Different Hash {}-{}", pos.level(), pos.nth());
+                    debug!("Different Hash {}-{}", pos.level(), pos.nth());
                     all_same = false;
                 }
             }

@@ -1,3 +1,4 @@
+use log::debug;
 use super::hybrid::ref_unit::RefUnit;
 use crate::def::{OP_CREATE, OP_DELETE, OP_READ, OP_WRITE, SHARD_COUNT, SHARD_DIV};
 use aes_gcm::Aes256Gcm;
@@ -617,7 +618,7 @@ impl Unit {
 
 fn print_set(hash_set: &HashSet<([u8; 10], i64)>) {
     for (k80, pos) in hash_set.iter() {
-        println!("k80={} pos={:#016x}", hex::encode(k80), pos);
+        debug!("k80={} pos={:#016x}", hex::encode(k80), pos);
     }
 }
 
@@ -657,7 +658,7 @@ impl UnitTrait for Unit4Test {
         let r = self.ref_u.debug_get_values(0, k56 << 8);
         let i = self.u.debug_get_values(k56);
         if r != i {
-            println!("r={:?}\ni={:?}", r, i);
+            debug!("r={:?}\ni={:?}", r, i);
             panic!("for_each_value mismatch k56={:#016x}", k56);
         }
         self.u.for_each_value(k56, access);
@@ -670,9 +671,9 @@ impl UnitTrait for Unit4Test {
         let r = self.ref_u.debug_get_adjacent_values(&k80, 0, k56 << 8);
         let i = self.u.debug_get_adjacent_values(&k80, k56);
         if r != i {
-            println!("=====ref====== k80={}", hex::encode(k80));
+            debug!("=====ref====== k80={}", hex::encode(k80));
             print_set(&r);
-            println!("=====imp======");
+            debug!("=====imp======");
             print_set(&i);
             panic!("for_each_adjacent_value mismatch");
         }

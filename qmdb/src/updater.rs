@@ -12,7 +12,10 @@ use crate::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use log::debug;
 
+/// Processes key-value operations (create, write, delete) for a single shard,
+/// appending new entries to the update buffer and maintaining the index.
 pub struct Updater {
     shard_id: usize,
     task_hub: Arc<dyn TaskHub>,
@@ -35,6 +38,7 @@ pub struct Updater {
 }
 
 impl Updater {
+    /// Create a new updater for the given shard with the specified compaction parameters.
     pub fn new(
         shard_id: usize,
         task_hub: Arc<dyn TaskHub>,
@@ -106,7 +110,8 @@ impl Updater {
         }
     }
 
-    // handle out-of-order id
+    /// Execute a task that may arrive out of order, buffering it until all
+    /// preceding tasks have been processed.
     pub fn run_task_with_ooo_id(&mut self, task_id: i64, next_task_id: i64) {
         // insert them so they are viewed as "ready to run"
         self.next_task_id_map.insert(task_id, next_task_id);
@@ -123,6 +128,8 @@ impl Updater {
         self.next_task_id = next_task_id;
     }
 
+    /// Execute a single task: apply its change sets (create/write/delete ops) and
+    /// signal end-of-block when the task completes the current block.
     pub fn run_task(&mut self, task_id: i64) {
         let (cache_for_new_block, end_block) = self.task_hub.check_begin_end(task_id);
         if let Some(cache) = cache_for_new_block {
@@ -282,7 +289,7 @@ impl Updater {
         });
         if old_pos < 0 {
             indexer.for_each_adjacent_value(height, &key_hash[..], |key, file_pos| -> bool {
-                println!("FF key = {:?} file_pos = {}", key, file_pos);
+                debug!("FF key = {:?} file_pos = {}", key, file_pos);
                 false
             });
             panic!(
@@ -334,6 +341,8 @@ impl Updater {
         }
     }
 
+    /// Consume one compaction job: re-append an old active entry with a new serial number,
+    /// advancing the oldest active boundary.
     pub fn compact(&mut self, r: Option<&Box<OpRecord>>, comp_idx: usize) {
         let (job, kh) = loop {
             //println!("before updater what something from consumer channel");
@@ -430,12 +439,12 @@ fn _compare_prev_changed(rec: Option<&Box<OpRecord>>, entry: &Entry, dsn_list: &
             let r = Entry::from_bz(&tmp);
             let key_hash = tmp.key_hash();
             let shard_id = key_hash[0] as usize * 256 / SHARD_DIV;
-            println!(
+            debug!(
                 "AA cmpr prev_C shard_id={}\nref={:?}\nimp={:?}\ndsn_list={:?}",
                 shard_id, r, entry, dsn_list
             );
             for (_, sn) in tmp.dsn_iter() {
-                println!("--{}", sn);
+                debug!("--{}", sn);
             }
         }
         assert!(equal, "compare_prev_changed failed");
@@ -459,7 +468,7 @@ fn _compare_dig_entry(rec: Option<&Box<OpRecord>>, entry_bz: &EntryBz, comp_idx:
             let i = Entry::from_bz(entry_bz);
             let key_hash = entry_bz.key_hash();
             let shard_id = key_hash[0] >> 4;
-            println!(
+            debug!(
                 "AA cmpr dig_E shard_id={}\nref={:?}\nimp={:?}\nref={:?}\nimp={:?}",
                 shard_id,
                 r,

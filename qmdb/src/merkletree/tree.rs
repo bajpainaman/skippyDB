@@ -1,3 +1,6 @@
+use log::debug;
+#[cfg(feature = "cuda")]
+use log::error;
 use aes_gcm::Aes256Gcm;
 use rayon;
 use std::collections::{HashMap, HashSet};
@@ -384,7 +387,7 @@ impl UpperTree {
                 s.spawn(move |_| do_sync_job(upper_tree, nodes, level, shard_id, shard_list));
             }
             for &i in n_list.iter() {
-                if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                     new_list.push(i / 2);
                 }
             }
@@ -407,7 +410,7 @@ impl UpperTree {
                 n_list = self.sync_nodes_by_level(level, n_list, youngest_twig_id);
             }
         }
-        let root = *self.get_node(NodePos::pos(max_level as u64, 0)).unwrap();
+        let root = *self.get_node(NodePos::pos(max_level as u64, 0)).expect("root node missing at max_level");
         (n_list, root)
     }
 
@@ -423,7 +426,7 @@ impl UpperTree {
         for twig_id in twig_evict_start..twig_evict_end {
             // evict the twig and store its twigRoot in nodes
             let pos = NodePos::pos(TWIG_ROOT_LEVEL as u64, twig_id);
-            let twig_root = self.get_twig(twig_id).unwrap().twig_root;
+            let twig_root = self.get_twig(twig_id).expect("twig not found during eviction").twig_root;
             self.set_node_copy(pos, &twig_root);
             let (shard_idx, key) = get_shard_idx_and_key(twig_id);
             self.active_twig_shards[shard_idx].remove(&key);
@@ -448,13 +451,13 @@ impl UpperTree {
                     for &i in shard_items {
                         let twig_id = i >> 1;
                         let (_, k) = get_shard_idx_and_key(twig_id);
-                        twig_shard.get_mut(&k).unwrap().sync_l2((i & 1) as i32);
+                        twig_shard.get_mut(&k).expect("twig not found for sync_l2").sync_l2((i & 1) as i32);
                     }
                 });
             }
 
             for i in &n_list {
-                if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                     new_list.push(i / 2);
                 }
             }
@@ -476,14 +479,14 @@ impl UpperTree {
                 s.spawn(move |_| {
                     for &twig_id in shard_items {
                         let (_, k) = get_shard_idx_and_key(twig_id);
-                        twig_shard.get_mut(&k).unwrap().sync_l3();
-                        twig_shard.get_mut(&k).unwrap().sync_top();
+                        twig_shard.get_mut(&k).expect("twig not found for sync_l3").sync_l3();
+                        twig_shard.get_mut(&k).expect("twig not found for sync_top").sync_top();
                     }
                 });
             }
 
             for i in &n_list {
-                if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                     new_list.push(i / 2);
                 }
             }
@@ -531,13 +534,13 @@ impl UpperTree {
                     right,
                 });
             } else {
-                let child_nodes = self.nodes.get((level - 1) as usize).unwrap();
+                let child_nodes = self.nodes.get((level - 1) as usize).expect("child_nodes level missing in upper tree");
                 let node_pos_l = NodePos::pos((level - 1) as u64, 2 * i);
                 let node_pos_r = NodePos::pos((level - 1) as u64, 2 * i + 1);
                 let sl = node_pos_l.nth() as usize % NODE_SHARD_COUNT;
                 let sr = node_pos_r.nth() as usize % NODE_SHARD_COUNT;
-                let left = *child_nodes[sl].get(&node_pos_l).unwrap();
-                let right = *child_nodes[sr].get(&node_pos_r).unwrap();
+                let left = *child_nodes[sl].get(&node_pos_l).expect("left child node missing in GPU sync");
+                let right = *child_nodes[sr].get(&node_pos_r).expect("right child node missing in GPU sync");
                 jobs.push(NodeHashJob {
                     level: level as u8 - 1,
                     left,
@@ -558,7 +561,7 @@ impl UpperTree {
         // Build next level's n_list
         let mut new_list = Vec::with_capacity(n_list.len());
         for &i in &n_list {
-            if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+            if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                 new_list.push(i / 2);
             }
         }
@@ -579,7 +582,7 @@ impl UpperTree {
                 n_list = self.sync_nodes_by_level_gpu(gpu, level, n_list, youngest_twig_id);
             }
         }
-        let root = *self.get_node(NodePos::pos(max_level as u64, 0)).unwrap();
+        let root = *self.get_node(NodePos::pos(max_level as u64, 0)).expect("root node missing at max_level in GPU sync");
         (n_list, root)
     }
 
@@ -603,7 +606,7 @@ impl UpperTree {
         let max_level = calc_max_level(youngest_twig_id);
 
         if n_list.is_empty() {
-            let root = *self.get_node(NodePos::pos(max_level as u64, 0)).unwrap();
+            let root = *self.get_node(NodePos::pos(max_level as u64, 0)).expect("root node missing at max_level in GPU-resident sync");
             return (n_list, root);
         }
 
@@ -631,7 +634,7 @@ impl UpperTree {
         // Batch upload all nodes to GPU store
         if !populate_pairs.is_empty() {
             if let Err(e) = gpu_store.insert_from_host(&populate_pairs) {
-                eprintln!("[gpu-resident] Failed to populate store: {e}, falling back to per-level GPU");
+                error!("[gpu-resident] Failed to populate store: {e}, falling back to per-level GPU");
                 return self.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id);
             }
         }
@@ -650,7 +653,7 @@ impl UpperTree {
                 // Build next level n_list for boundary calculation
                 let mut new_list = Vec::with_capacity(current_n_list.len());
                 for &i in &current_n_list {
-                    if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                    if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                         new_list.push(i / 2);
                     }
                 }
@@ -694,7 +697,7 @@ impl UpperTree {
                     // Build next level
                     let mut new_list = Vec::with_capacity(current_list.len());
                     for &i in &current_list {
-                        if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                        if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                             new_list.push(i / 2);
                         }
                     }
@@ -704,7 +707,7 @@ impl UpperTree {
                 (final_n_list, root_hash)
             }
             Err(e) => {
-                eprintln!(
+                error!(
                     "[gpu-resident] sync failed: {e}, falling back to per-level GPU"
                 );
                 self.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
@@ -724,7 +727,7 @@ impl UpperTree {
         let new_list = self.sync_mt_for_active_bits_phase2_gpu(gpu, n_list);
         for twig_id in twig_evict_start..twig_evict_end {
             let pos = NodePos::pos(TWIG_ROOT_LEVEL as u64, twig_id);
-            let twig_root = self.get_twig(twig_id).unwrap().twig_root;
+            let twig_root = self.get_twig(twig_id).expect("twig not found during GPU eviction").twig_root;
             self.set_node_copy(pos, &twig_root);
             let (shard_idx, key) = get_shard_idx_and_key(twig_id);
             self.active_twig_shards[shard_idx].remove(&key);
@@ -744,7 +747,7 @@ impl UpperTree {
         let mut twig_list: Vec<u64> = Vec::with_capacity(n_list.len());
         for &i in &n_list {
             let twig_id = i / 2;
-            if twig_list.is_empty() || *twig_list.last().unwrap() != twig_id {
+            if twig_list.is_empty() || *twig_list.last().expect("last() after non-empty check") != twig_id {
                 twig_list.push(twig_id);
             }
         }
@@ -757,7 +760,7 @@ impl UpperTree {
 
             for &twig_id in &twig_list {
                 let (s, k) = get_shard_idx_and_key(twig_id);
-                let twig = self.active_twig_shards[s].get(&k).unwrap();
+                let twig = self.active_twig_shards[s].get(&k).expect("twig not found for GPU active bits phase2");
                 l1_values.push(twig.active_bits_mtl1[0]);
                 l1_values.push(twig.active_bits_mtl1[1]);
                 l1_values.push(twig.active_bits_mtl1[2]);
@@ -772,7 +775,7 @@ impl UpperTree {
             // Write back all results
             for (idx, &twig_id) in twig_list.iter().enumerate() {
                 let (s, k) = get_shard_idx_and_key(twig_id);
-                let twig = self.active_twig_shards[s].get_mut(&k).unwrap();
+                let twig = self.active_twig_shards[s].get_mut(&k).expect("twig not found for GPU active bits writeback");
                 twig.active_bits_mtl2[0] = l2_out[idx * 2];
                 twig.active_bits_mtl2[1] = l2_out[idx * 2 + 1];
                 twig.active_bits_mtl3 = l3_out[idx];
@@ -783,7 +786,7 @@ impl UpperTree {
         // Return next-level n_list
         let mut new_list: Vec<u64> = Vec::with_capacity(twig_list.len());
         for &i in &twig_list {
-            if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+            if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                 new_list.push(i / 2);
             }
         }
@@ -798,7 +801,7 @@ fn do_sync_job(
     _shard_id: usize,
     n_list: &[u64],
 ) {
-    let child_nodes = upper_tree.nodes.get((level - 1) as usize).unwrap();
+    let child_nodes = upper_tree.nodes.get((level - 1) as usize).expect("child_nodes level missing in do_sync_job");
     for &i in n_list {
         let pos = NodePos::pos(level as u64, i);
         if level == FIRST_LEVEL_ABOVE_TWIG {
@@ -968,7 +971,7 @@ impl Tree {
         self.entry_file_wr
             .entry_file
             .truncate(entry_file_size)
-            .unwrap();
+            .expect("I/O failed: truncate entry file");
         self.twig_file_wr.twig_file.truncate(twig_file_size);
     }
 
@@ -982,7 +985,7 @@ impl Tree {
 
     fn get_active_bits_mut(&mut self, twig_id: u64) -> &mut ActiveBits {
         let (shard_idx, key) = get_shard_idx_and_key(twig_id);
-        self.active_bit_shards[shard_idx].get_mut(&key).unwrap()
+        self.active_bit_shards[shard_idx].get_mut(&key).expect("active_bits not found for twig")
     }
 
     pub fn get_active_bit(&self, sn: u64) -> bool {
@@ -1071,7 +1074,7 @@ impl Tree {
         self.entry_file_wr
             .entry_file
             .prune_head(entry_file_size)
-            .unwrap();
+            .expect("I/O failed: prune_head entry file");
         self.twig_file_wr
             .twig_file
             .prune_head((end_id * twigfile::TWIG_SIZE) as i64);
@@ -1085,13 +1088,13 @@ impl Tree {
         let n_list = thread::scope(|s| {
             // run flushing in a threads such that sync_* won't be blocked
             s.spawn(|| {
-                entry_file_tmp.flush().unwrap();
+                entry_file_tmp.flush().expect("I/O failed: flush entry file");
             });
             s.spawn(|| {
                 twig_file_tmp.flush();
             });
             self.sync_mt_for_youngest_twig(false);
-            let youngest_twig = self.new_twig_map.get(&self.youngest_twig_id).unwrap();
+            let youngest_twig = self.new_twig_map.get(&self.youngest_twig_id).expect("youngest twig not found in new_twig_map");
             let mut twig_map = HashMap::new();
             twig_map.insert(self.youngest_twig_id, youngest_twig.clone());
             mem::swap(&mut self.new_twig_map, &mut twig_map);
@@ -1137,16 +1140,16 @@ impl Tree {
                     for &i in shard_items {
                         let twig_id = i >> 2;
                         let (s, k) = get_shard_idx_and_key(twig_id);
-                        let active_bits = active_bit_shards[s].get(&k).unwrap();
+                        let active_bits = active_bit_shards[s].get(&k).expect("active_bits not found for sync_l1");
                         twig_shard
                             .get_mut(&k)
-                            .unwrap()
+                            .expect("twig not found for sync_l1")
                             .sync_l1((i & 3) as i32, active_bits);
                     }
                 });
             }
             for i in &n_list {
-                if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+                if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                     new_list.push(i / 2);
                 }
             }
@@ -1167,9 +1170,9 @@ impl Tree {
         self.mtree_for_yt_change_end = 0;
         let youngest_twig;
         if recover_mode {
-            youngest_twig = self.upper_tree.get_twig(self.youngest_twig_id).unwrap();
+            youngest_twig = self.upper_tree.get_twig(self.youngest_twig_id).expect("youngest twig not found in upper_tree during recover sync");
         } else {
-            youngest_twig = self.new_twig_map.get_mut(&self.youngest_twig_id).unwrap();
+            youngest_twig = self.new_twig_map.get_mut(&self.youngest_twig_id).expect("youngest twig not found in new_twig_map during sync");
         }
         youngest_twig
             .left_root
@@ -1182,7 +1185,7 @@ impl Tree {
         }
         self.mtree_for_yt_change_start = -1;
         self.mtree_for_yt_change_end = 0;
-        let active_twig = self.upper_tree.get_twig(self.youngest_twig_id).unwrap();
+        let active_twig = self.upper_tree.get_twig(self.youngest_twig_id).expect("youngest twig not found in upper_tree for non-youngest load");
         self.twig_file_wr
             .twig_file
             .get_hash_root(twig_id, &mut active_twig.left_root);
@@ -1332,7 +1335,7 @@ impl Tree {
             let self_id: u64 = (nth % level_stride) - level_stride / 2;
             if level == 8 {
                 let hash = active_bits.get_bits(self_id as usize, 32);
-                return hash.try_into().unwrap();
+                return hash.try_into().expect("active_bits hash slice must be 32 bytes");
             }
             let twig = self.upper_tree.active_twig_shards[s]
                 .get(&k)
@@ -1375,13 +1378,13 @@ impl Tree {
         mem::swap(&mut twig_file_tmp, &mut self.twig_file_wr);
         let n_list = thread::scope(|s| {
             s.spawn(|| {
-                entry_file_tmp.flush().unwrap();
+                entry_file_tmp.flush().expect("I/O failed: flush entry file in GPU path");
             });
             s.spawn(|| {
                 twig_file_tmp.flush();
             });
             self.sync_mt_for_youngest_twig_gpu(gpu);
-            let youngest_twig = self.new_twig_map.get(&self.youngest_twig_id).unwrap();
+            let youngest_twig = self.new_twig_map.get(&self.youngest_twig_id).expect("youngest twig not found in new_twig_map during GPU flush");
             let mut twig_map = HashMap::new();
             twig_map.insert(self.youngest_twig_id, youngest_twig.clone());
             mem::swap(&mut self.new_twig_map, &mut twig_map);
@@ -1414,7 +1417,7 @@ impl Tree {
         );
         self.mtree_for_yt_change_start = -1;
         self.mtree_for_yt_change_end = 0;
-        let youngest_twig = self.new_twig_map.get_mut(&self.youngest_twig_id).unwrap();
+        let youngest_twig = self.new_twig_map.get_mut(&self.youngest_twig_id).expect("youngest twig not found in new_twig_map during GPU youngest sync");
         youngest_twig
             .left_root
             .copy_from_slice(&self.mtree_for_youngest_twig[1]);
@@ -1444,7 +1447,7 @@ impl Tree {
             let twig_id = i >> 2;
             let pos = (i & 3) as i32;
             let (s, k) = get_shard_idx_and_key(twig_id);
-            let active_bits = self.active_bit_shards[s].get(&k).unwrap();
+            let active_bits = self.active_bit_shards[s].get(&k).expect("active_bits not found for GPU phase1 sync");
             let start = pos as usize * 512;
             // sync_l1 hashes active_bits pages into mtl1
             let left_bits = active_bits.get_bits(start / 256, 32);
@@ -1467,14 +1470,14 @@ impl Tree {
                 let (s, k) = get_shard_idx_and_key(*twig_id);
                 let twig = self.upper_tree.active_twig_shards[s]
                     .get_mut(&k)
-                    .unwrap();
+                    .expect("twig not found for GPU phase1 writeback");
                 twig.active_bits_mtl1[*pos as usize] = results[idx];
             }
         }
 
         let mut new_list = Vec::with_capacity(n_list.len());
         for &i in &n_list {
-            if new_list.is_empty() || *new_list.last().unwrap() != i / 2 {
+            if new_list.is_empty() || *new_list.last().expect("last() after non-empty check") != i / 2 {
                 new_list.push(i / 2);
             }
         }
@@ -1536,7 +1539,7 @@ impl Tree {
                 let entry_bz = EntryBz { bz: &buf[0..n] };
                 let entry = Entry::from_bz(&entry_bz);
 
-                println!(
+                debug!(
                     "[entry] twig: {}, sn: {}, k: {}, v: {}",
                     twig_id,
                     entry.serial_number,
@@ -1550,7 +1553,7 @@ impl Tree {
         for twig_id in 0..self.youngest_twig_id {
             for _sn in twig_id * 2048..(twig_id + 1) * 2048 {
                 let _h = self.get_hash_by_node(0, _sn, &mut cache);
-                println!(
+                debug!(
                     "[hash] level: {}, nth: {}, hash: {}",
                     0,
                     _sn,

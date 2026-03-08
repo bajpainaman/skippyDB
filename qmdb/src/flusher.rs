@@ -12,6 +12,9 @@ use crate::metadb::{MetaDB, MetaInfo};
 use crate::gpu::GpuHasher;
 #[cfg(feature = "cuda")]
 use crate::gpu::GpuNodeStore;
+use log::info;
+#[cfg(feature = "cuda")]
+use log::error;
 use parking_lot::RwLock;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Barrier, Condvar, Mutex};
@@ -19,12 +22,16 @@ use std::thread;
 
 type RocksMetaDB = MetaDB;
 
+/// Synchronization barriers used to coordinate flush phases across shards.
 pub struct BarrierSet {
+    /// Barrier that all shards wait on after flushing files to disk.
     pub flush_bar: Barrier,
+    /// Barrier that non-zero shards wait on while shard 0 commits metadata.
     pub metadb_bar: Barrier,
 }
 
 impl BarrierSet {
+    /// Create a new barrier set where each barrier waits for `n` participants.
     pub fn new(n: usize) -> Self {
         Self {
             flush_bar: Barrier::new(n),
@@ -33,8 +40,10 @@ impl BarrierSet {
     }
 }
 
+/// A shared proof request element: holds a serial number and receives the computed proof path.
 pub type ProofReqElem = Arc<(Mutex<(u64, Option<Result<ProofPath, String>>)>, Condvar)>;
 
+/// Coordinates flushing pending entries and Merkle tree updates to disk across all shards.
 pub struct Flusher {
     shards: Vec<Box<FlusherShard>>,
     meta: Arc<RwLock<RocksMetaDB>>,
@@ -44,6 +53,7 @@ pub struct Flusher {
 }
 
 impl Flusher {
+    /// Create a new flusher with the given shards, metadata store, and block channel.
     pub fn new(
         shards: Vec<Box<FlusherShard>>,
         meta: Arc<RwLock<RocksMetaDB>>,
@@ -60,6 +70,7 @@ impl Flusher {
         }
     }
 
+    /// Return a cloned proof-request sender for each shard.
     pub fn get_proof_req_senders(&self) -> Vec<SyncSender<ProofReqElem>> {
         let mut v = Vec::with_capacity(SHARD_COUNT);
         for i in 0..SHARD_COUNT {
@@ -68,6 +79,7 @@ impl Flusher {
         v
     }
 
+    /// Run the CPU flush loop, processing blocks indefinitely across all shards.
     pub fn flush(&mut self, shard_count: usize) {
         loop {
             self.curr_height += 1;
@@ -88,10 +100,12 @@ impl Flusher {
         }
     }
 
+    /// Return a shared reference to the entry file for the given shard.
     pub fn get_entry_file(&self, shard_id: usize) -> Arc<EntryFile> {
         self.shards[shard_id].tree.entry_file_wr.entry_file.clone()
     }
 
+    /// Attach an entry buffer reader to the specified shard for consuming buffered entries.
     pub fn set_entry_buf_reader(&mut self, shard_id: usize, ebr: EntryBufferReader) {
         self.shards[shard_id].buf_read = Some(ebr);
     }
@@ -106,7 +120,7 @@ impl Flusher {
             match GpuNodeStore::new() {
                 Ok(store) => gpu_stores.push(Some(store)),
                 Err(e) => {
-                    eprintln!("[flash-map] GpuNodeStore init failed: {e}, using per-level GPU path");
+                    error!("[flash-map] GpuNodeStore init failed: {e}, using per-level GPU path");
                     gpu_stores.push(None);
                 }
             }
@@ -140,6 +154,8 @@ impl Flusher {
     }
 }
 
+/// Handles flushing for a single shard: reads buffered entries, updates the Merkle tree,
+/// prunes old twigs, and persists metadata.
 pub struct FlusherShard {
     buf_read: Option<EntryBufferReader>,
     tree: Tree,
@@ -154,6 +170,7 @@ pub struct FlusherShard {
 }
 
 impl FlusherShard {
+    /// Create a new flusher shard with the given Merkle tree and compaction starting point.
     pub fn new(tree: Tree, oldest_active_sn: u64, shard_id: usize) -> Self {
         #[cfg(feature = "slow_hashing")]
         let (ut_sender, ut_receiver) = sync_channel(2);
@@ -173,21 +190,25 @@ impl FlusherShard {
         }
     }
 
+    /// Drain and fulfill all pending proof requests from the channel.
     pub fn handle_proof_req(&self) {
         loop {
             let pair = self.proof_req_receiver.try_recv();
             if pair.is_err() {
                 break;
             }
-            let pair = pair.unwrap();
+            let pair = pair.expect("proof_req try_recv returned Err after is_err check");
             let (lock, cvar) = &*pair;
-            let mut sn_proof = lock.lock().unwrap();
+            let mut sn_proof = lock.lock().expect("lock poisoned: proof_request_mutex");
             let proof = self.tree.get_proof(sn_proof.0);
             sn_proof.1 = Some(proof);
             cvar.notify_one();
         }
     }
 
+    /// Flush one block for this shard: append entries, sync the Merkle tree,
+    /// prune old twigs if needed, and commit metadata. Coordinates with other
+    /// shards via the barrier set.
     pub fn flush(
         &mut self,
         prune_to_height: i64,
@@ -196,11 +217,11 @@ impl FlusherShard {
         bar_set: Arc<BarrierSet>,
         end_block_chan: SyncSender<Arc<MetaInfo>>,
     ) {
-        let buf_read = self.buf_read.as_mut().unwrap();
+        let buf_read = self.buf_read.as_mut().expect("buf_read not initialized for flusher shard");
         loop {
             let mut file_pos: i64 = 0;
             let (is_end_of_block, expected_file_pos) = buf_read.read_next_entry(|entry_bz| {
-                file_pos = self.tree.append_entry(&entry_bz).unwrap();
+                file_pos = self.tree.append_entry(&entry_bz).expect("I/O failed: append entry during flush");
                 for (_, dsn) in entry_bz.dsn_iter() {
                     self.tree.deactive_entry(dsn);
                 }
@@ -217,7 +238,7 @@ impl FlusherShard {
         #[cfg(feature = "slow_hashing")]
         {
             if self.tree.upper_tree.is_empty() {
-                let mut upper_tree = self.upper_tree_receiver.recv().unwrap();
+                let mut upper_tree = self.upper_tree_receiver.recv().expect("channel closed: upper_tree_receiver");
                 std::mem::swap(&mut self.tree.upper_tree, &mut upper_tree);
             }
             let mut start_twig_id: u64 = 0;
@@ -309,7 +330,7 @@ impl FlusherShard {
                             //println!("{} end block", curr_height);
                         }
                         Err(_) => {
-                            println!("end block sender exit!");
+                            info!("end block sender exit!");
                             return;
                         }
                     }
@@ -317,7 +338,7 @@ impl FlusherShard {
                     drop(meta);
                     bar_set.metadb_bar.wait();
                 }
-                upper_tree_sender.send(upper_tree).unwrap();
+                upper_tree_sender.send(upper_tree).expect("channel closed: upper_tree_sender");
             });
         }
 
@@ -410,7 +431,7 @@ impl FlusherShard {
                         //println!("{} end block", curr_height);
                     }
                     Err(_) => {
-                        println!("end block sender exit!");
+                        info!("end block sender exit!");
                     }
                 }
             } else {
@@ -433,11 +454,11 @@ impl FlusherShard {
         end_block_chan: SyncSender<Arc<MetaInfo>>,
     ) {
         // 1. Read entries from buffer and append to tree (same as CPU path)
-        let buf_read = self.buf_read.as_mut().unwrap();
+        let buf_read = self.buf_read.as_mut().expect("buf_read not initialized for GPU flusher shard");
         loop {
             let mut file_pos: i64 = 0;
             let (is_end_of_block, expected_file_pos) = buf_read.read_next_entry(|entry_bz| {
-                file_pos = self.tree.append_entry(&entry_bz).unwrap();
+                file_pos = self.tree.append_entry(&entry_bz).expect("I/O failed: append entry during GPU flush");
                 for (_, dsn) in entry_bz.dsn_iter() {
                     self.tree.deactive_entry(dsn);
                 }
@@ -547,7 +568,7 @@ impl FlusherShard {
                 match end_block_chan.send(meta_info) {
                     Ok(_) => {}
                     Err(_) => {
-                        println!("end block sender exit!");
+                        info!("end block sender exit!");
                     }
                 }
             } else {
@@ -572,11 +593,11 @@ impl FlusherShard {
         end_block_chan: SyncSender<Arc<MetaInfo>>,
     ) {
         // 1. Read entries from buffer and append to tree (same as CPU/GPU path)
-        let buf_read = self.buf_read.as_mut().unwrap();
+        let buf_read = self.buf_read.as_mut().expect("buf_read not initialized for GPU-resident flusher shard");
         loop {
             let mut file_pos: i64 = 0;
             let (is_end_of_block, expected_file_pos) = buf_read.read_next_entry(|entry_bz| {
-                file_pos = self.tree.append_entry(&entry_bz).unwrap();
+                file_pos = self.tree.append_entry(&entry_bz).expect("I/O failed: append entry during GPU-resident flush");
                 for (_, dsn) in entry_bz.dsn_iter() {
                     self.tree.deactive_entry(dsn);
                 }
@@ -695,7 +716,7 @@ impl FlusherShard {
                 match end_block_chan.send(meta_info) {
                     Ok(_) => {}
                     Err(_) => {
-                        println!("end block sender exit!");
+                        info!("end block sender exit!");
                     }
                 }
             } else {

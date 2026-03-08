@@ -8,12 +8,17 @@ use std::sync::Arc;
 use std::thread;
 use std::time;
 
+/// A unit of compaction work: an active entry at its old file position to be re-appended.
 #[derive(Clone)]
 pub struct CompactJob {
+    /// File position of the entry to be compacted.
     pub old_pos: i64,
+    /// Serialized entry bytes at the old position.
     pub entry_bz: Vec<u8>,
 }
 
+/// Scans the entry file sequentially, producing compaction jobs for active entries
+/// that the updater consumes to reclaim space from deactivated entries.
 pub struct Compactor {
     shard_id: usize,
     compact_trigger: usize,
@@ -24,6 +29,7 @@ pub struct Compactor {
 }
 
 impl Compactor {
+    /// Create a new compactor for the given shard.
     pub fn new(
         shard_id: usize,
         compact_trigger: usize,
@@ -40,6 +46,8 @@ impl Compactor {
         }
     }
 
+    /// Continuously scan entries starting at `file_pos`, sending active entries to the
+    /// compaction channel. Blocks when the index is below the compact trigger threshold.
     pub fn fill_compact_chan(&mut self, file_pos: i64) {
         let mut file_pos = file_pos;
         let mut bz = Vec::with_capacity(DEFAULT_ENTRY_SIZE);

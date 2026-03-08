@@ -15,6 +15,7 @@ use std::{
     os::unix::fs::FileExt,
 };
 
+/// Snapshot of database metadata at a given block height, persisted to disk on each commit.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct MetaInfo {
     pub curr_height: i64,
@@ -50,6 +51,8 @@ impl MetaInfo {
     }
 }
 
+/// Persistent metadata store for block heights, root hashes, serial numbers, and pruning state.
+/// Writes are double-buffered to alternating files for crash safety.
 pub struct MetaDB {
     info: MetaInfo,
     meta_file_name: String,
@@ -71,11 +74,12 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
 }
 
 impl MetaDB {
+    /// Open or create a metadata store in the given directory, optionally with AES-GCM encryption.
     pub fn with_dir(dir_name: &str, cipher: Option<Aes256Gcm>) -> Self {
         let meta_file_name = format!("{}/info", dir_name);
         let file_name = format!("{}/prune_helper", dir_name);
         if !Path::new(dir_name).exists() {
-            fs::create_dir(dir_name).unwrap();
+            fs::create_dir(dir_name).expect("I/O failed: create metadb directory");
         }
         let history_file = File::options()
             .read(true)
@@ -95,6 +99,7 @@ impl MetaDB {
         res
     }
 
+    /// Reload metadata from the two alternating on-disk files, picking the one with the highest height.
     pub fn reload_from_file(&mut self) {
         let mut name = format!("{}.0", self.meta_file_name);
         if Path::new(&name).exists() {
@@ -132,7 +137,7 @@ impl MetaDB {
         if bz.len() < TAG_SIZE + 8 {
             panic!("meta db file size not correct")
         }
-        let cipher = (*cipher).as_ref().unwrap();
+        let cipher = (*cipher).as_ref().expect("cipher must be Some for decryption");
         let mut nonce_arr = [0u8; NONCE_SIZE];
         nonce_arr[..8].copy_from_slice(&bz[0..8]);
         let tag_start = bz.len() - TAG_SIZE;
@@ -146,22 +151,25 @@ impl MetaDB {
         };
     }
 
+    /// Return the extra data string stored at the current height.
     pub fn get_extra_data(&self) -> String {
         self.info.extra_data.clone()
     }
 
+    /// Queue extra data to be committed at the given block height.
     pub fn insert_extra_data(&mut self, height: i64, data: String) {
         self.extra_data_map.insert(height, data);
     }
 
+    /// Serialize and persist the current metadata to disk, returning a shared snapshot.
     pub fn commit(&mut self) -> Arc<MetaInfo> {
         self.wait_for_pending_write();
-        let kv = self.extra_data_map.remove(&self.info.curr_height).unwrap();
+        let kv = self.extra_data_map.remove(&self.info.curr_height).expect("extra_data missing for curr_height at commit");
         self.info.extra_data = kv.1;
         let name = format!("{}.{}", self.meta_file_name, self.info.curr_height % 2);
-        let mut bz = bincode::serialize(&self.info).unwrap();
+        let mut bz = bincode::serialize(&self.info).expect("serialization failed: MetaInfo");
         if self.cipher.is_some() {
-            let cipher = self.cipher.as_ref().unwrap();
+            let cipher = self.cipher.as_ref().expect("cipher must be Some when is_some check passed");
             let mut nonce_arr = [0u8; NONCE_SIZE];
             LittleEndian::write_i64(&mut nonce_arr[..8], self.info.curr_height);
             match cipher.encrypt_in_place_detached(&nonce_arr.into(), b"", &mut bz) {
@@ -171,11 +179,11 @@ impl MetaDB {
                     out.extend_from_slice(&nonce_arr[0..8]);
                     out.extend_from_slice(&bz);
                     out.extend_from_slice(tag.as_slice());
-                    fs::write(&name, out).unwrap();
+                    fs::write(&name, out).expect("I/O failed: write encrypted meta file");
                 }
             };
         } else {
-            fs::write(&name, bz).unwrap();
+            fs::write(&name, bz).expect("I/O failed: write meta file");
         }
         if self.info.curr_height % PRUNE_EVERY_NBLOCKS == 0 && self.info.curr_height > 0 {
             let mut data = [0u8; SHARD_COUNT * 16];
@@ -185,7 +193,7 @@ impl MetaDB {
                 LittleEndian::write_u64(&mut data[start..start + 8], twig_id);
                 LittleEndian::write_u64(&mut data[start + 8..start + 16], entry_file_size as u64);
                 if self.cipher.is_some() {
-                    let cipher = self.cipher.as_ref().unwrap();
+                    let cipher = self.cipher.as_ref().expect("cipher must be Some when is_some check passed");
                     let n = self.info.curr_height / PRUNE_EVERY_NBLOCKS;
                     let pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * (16 + TAG_SIZE);
                     let mut nonce_arr = [0u8; NONCE_SIZE];
@@ -197,14 +205,14 @@ impl MetaDB {
                     ) {
                         Err(err) => panic!("{}", err),
                         Ok(tag) => {
-                            self.history_file.write(&data[start..start + 16]).unwrap();
-                            self.history_file.write(tag.as_slice()).unwrap();
+                            self.history_file.write(&data[start..start + 16]).expect("I/O failed: write history data");
+                            self.history_file.write(tag.as_slice()).expect("I/O failed: write history tag");
                         }
                     };
                 }
             }
             if self.cipher.is_none() {
-                self.history_file.write(&data[..]).unwrap();
+                self.history_file.write(&data[..]).expect("I/O failed: write history data");
             }
         }
         Arc::new(self.info.clone())
@@ -228,7 +236,7 @@ impl MetaDB {
         // Wait for any previous async write before starting a new one
         self.wait_for_pending_write();
 
-        let kv = self.extra_data_map.remove(&self.info.curr_height).unwrap();
+        let kv = self.extra_data_map.remove(&self.info.curr_height).expect("extra_data missing for curr_height at commit_async");
         self.info.extra_data = kv.1;
 
         // Serialize + encrypt synchronously (CPU-bound, fast)
@@ -237,9 +245,9 @@ impl MetaDB {
             self.meta_file_name,
             self.info.curr_height % 2
         );
-        let meta_bytes = bincode::serialize(&self.info).unwrap();
+        let meta_bytes = bincode::serialize(&self.info).expect("serialization failed: MetaInfo in commit_async");
         let write_data = if self.cipher.is_some() {
-            let cipher = self.cipher.as_ref().unwrap();
+            let cipher = self.cipher.as_ref().expect("cipher must be Some when is_some check passed");
             let mut nonce_arr = [0u8; NONCE_SIZE];
             LittleEndian::write_i64(&mut nonce_arr[..8], self.info.curr_height);
             let mut bz = meta_bytes;
@@ -276,7 +284,7 @@ impl MetaDB {
                     entry_file_size as u64,
                 );
                 if self.cipher.is_some() {
-                    let cipher = self.cipher.as_ref().unwrap();
+                    let cipher = self.cipher.as_ref().expect("cipher must be Some when is_some check passed");
                     let n = self.info.curr_height / PRUNE_EVERY_NBLOCKS;
                     let pos = (((n as usize - 1) * SHARD_COUNT) + shard_id)
                         * (16 + TAG_SIZE);
@@ -310,7 +318,7 @@ impl MetaDB {
         // can't be sent across threads easily, so we open it in the thread)
         let history_file_path = if history_data.is_some() {
             // Re-derive the history file path from the meta file name
-            let dir = Path::new(&self.meta_file_name).parent().unwrap();
+            let dir = Path::new(&self.meta_file_name).parent().expect("meta_file_name must have a parent directory");
             Some(format!("{}/prune_helper", dir.display()))
         } else {
             None
@@ -320,18 +328,18 @@ impl MetaDB {
 
         // Spawn background thread for file I/O
         self.pending_write = Some(std::thread::spawn(move || {
-            fs::write(&name, write_data).unwrap();
+            fs::write(&name, write_data).expect("I/O failed: async write meta file");
             if let Some((plain_data, encrypted_segments)) = history_data {
-                let history_path = history_file_path.unwrap();
+                let history_path = history_file_path.expect("history_file_path must be Some when history_data is Some");
                 let mut f = File::options()
                     .append(true)
                     .open(&history_path)
-                    .expect("failed to open history file for async write");
+                    .expect("I/O failed: open history file for async write");
                 if !plain_data.is_empty() {
-                    f.write_all(&plain_data).unwrap();
+                    f.write_all(&plain_data).expect("I/O failed: async write plain history data");
                 } else {
                     for seg in &encrypted_segments {
-                        f.write_all(seg).unwrap();
+                        f.write_all(seg).expect("I/O failed: async write encrypted history segment");
                     }
                 }
             }
@@ -340,30 +348,37 @@ impl MetaDB {
         result
     }
 
+    /// Set the current block height.
     pub fn set_curr_height(&mut self, h: i64) {
         self.info.curr_height = h;
     }
 
+    /// Return the current block height.
     pub fn get_curr_height(&self) -> i64 {
         self.info.curr_height
     }
 
+    /// Set the twig file size for the given shard.
     pub fn set_twig_file_size(&mut self, shard_id: usize, size: i64) {
         self.info.twig_file_sizes[shard_id] = size;
     }
 
+    /// Return the twig file size for the given shard.
     pub fn get_twig_file_size(&self, shard_id: usize) -> i64 {
         self.info.twig_file_sizes[shard_id]
     }
 
+    /// Set the entry file size for the given shard.
     pub fn set_entry_file_size(&mut self, shard_id: usize, size: i64) {
         self.info.entry_file_sizes[shard_id] = size;
     }
 
+    /// Return the entry file size for the given shard.
     pub fn get_entry_file_size(&self, shard_id: usize) -> i64 {
         self.info.entry_file_sizes[shard_id]
     }
 
+    /// Record the first twig ID and entry file size at a pruning-boundary height.
     pub fn set_first_twig_at_height(
         &mut self,
         shard_id: usize,
@@ -376,6 +391,7 @@ impl MetaDB {
         }
     }
 
+    /// Look up the first twig ID and entry file size recorded at the given pruning-boundary height.
     pub fn get_first_twig_at_height(&self, shard_id: usize, height: i64) -> (u64, i64) {
         let n = height / PRUNE_EVERY_NBLOCKS;
         let mut pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * 16;
@@ -384,8 +400,8 @@ impl MetaDB {
         }
         let mut buf = [0u8; 32];
         if self.cipher.is_some() {
-            self.history_file.read_at(&mut buf, pos as u64).unwrap();
-            let cipher = self.cipher.as_ref().unwrap();
+            self.history_file.read_at(&mut buf, pos as u64).expect("I/O failed: read_at history file (encrypted)");
+            let cipher = self.cipher.as_ref().expect("cipher must be Some when is_some check passed");
             let mut nonce_arr = [0u8; NONCE_SIZE];
             LittleEndian::write_u64(&mut nonce_arr[..8], pos as u64);
             let mut tag = [0u8; TAG_SIZE];
@@ -401,50 +417,60 @@ impl MetaDB {
         } else {
             self.history_file
                 .read_at(&mut buf[..16], pos as u64)
-                .unwrap();
+                .expect("I/O failed: read_at history file");
         }
         let twig_id = LittleEndian::read_u64(&buf[..8]);
         let entry_file_size = LittleEndian::read_u64(&buf[8..16]);
         (twig_id, entry_file_size as i64)
     }
 
+    /// Set the last pruned twig ID and the entry file position pruned up to.
     pub fn set_last_pruned_twig(&mut self, shard_id: usize, twig_id: u64, ef_prune_to: i64) {
         self.info.last_pruned_twig[shard_id] = (twig_id, ef_prune_to);
     }
 
+    /// Return the last pruned twig ID and entry file prune position for the given shard.
     pub fn get_last_pruned_twig(&self, shard_id: usize) -> (u64, i64) {
         self.info.last_pruned_twig[shard_id]
     }
 
+    /// Return the serialized edge nodes for Merkle tree recovery.
     pub fn get_edge_nodes(&self, shard_id: usize) -> Vec<u8> {
         self.info.edge_nodes[shard_id].clone()
     }
 
+    /// Store serialized edge nodes used for Merkle tree recovery after pruning.
     pub fn set_edge_nodes(&mut self, shard_id: usize, bz: &[u8]) {
         self.info.edge_nodes[shard_id] = bz.to_vec();
     }
 
+    /// Return the next serial number to be assigned in the given shard.
     pub fn get_next_serial_num(&self, shard_id: usize) -> u64 {
         self.info.next_serial_num[shard_id]
     }
 
+    /// Derive the youngest (most recent) twig ID from the next serial number.
     pub fn get_youngest_twig_id(&self, shard_id: usize) -> u64 {
         self.info.next_serial_num[shard_id] >> TWIG_SHIFT
     }
 
+    /// Set the next serial number for the given shard.
     pub fn set_next_serial_num(&mut self, shard_id: usize, sn: u64) {
         // called when new entry is appended
         self.info.next_serial_num[shard_id] = sn
     }
 
+    /// Return the Merkle root hash for the given shard.
     pub fn get_root_hash(&self, shard_id: usize) -> [u8; 32] {
         self.info.root_hash[shard_id]
     }
 
+    /// Set the Merkle root hash for the given shard.
     pub fn set_root_hash(&mut self, shard_id: usize, h: [u8; 32]) {
         self.info.root_hash[shard_id] = h
     }
 
+    /// Return the combined root hash at the given height, or zeros if unavailable.
     pub fn get_hash_of_root_hash(&self, height: i64) -> [u8; 32] {
         let mut is_prev_height = true;
         if height == self.info.curr_height {
@@ -468,22 +494,27 @@ impl MetaDB {
         }
     }
 
+    /// Return the oldest active serial number for the given shard.
     pub fn get_oldest_active_sn(&self, shard_id: usize) -> u64 {
         self.info.oldest_active_sn[shard_id]
     }
 
+    /// Set the oldest active serial number for the given shard.
     pub fn set_oldest_active_sn(&mut self, shard_id: usize, id: u64) {
         self.info.oldest_active_sn[shard_id] = id
     }
 
+    /// Return the file position of the oldest active entry for the given shard.
     pub fn get_oldest_active_file_pos(&self, shard_id: usize) -> i64 {
         self.info.oldest_active_file_pos[shard_id]
     }
 
+    /// Set the file position of the oldest active entry for the given shard.
     pub fn set_oldest_active_file_pos(&mut self, shard_id: usize, pos: i64) {
         self.info.oldest_active_file_pos[shard_id] = pos
     }
 
+    /// Reset all metadata to initial state and persist to disk.
     pub fn init(&mut self) {
         let curr_height = 0;
         self.info.curr_height = curr_height;

@@ -1,3 +1,4 @@
+use log::debug;
 use crate::def::{OP_CREATE, OP_DELETE, OP_READ, OP_WRITE, SHARD_COUNT};
 use crate::utils::{byte0_to_shard_id, hasher, OpRecord};
 use std::cmp::Ordering;
@@ -234,7 +235,7 @@ impl ChangeSet {
             };
 
             let old_val_start = op.key_hash_start as usize - op.old_value_len as usize;
-            println!(
+            debug!(
                 "op:{:?}, shard:{:?}, key:{:?}, nv:{:?}, ov:{:?}, kh:{:?}",
                 _op,
                 op.shard_id,

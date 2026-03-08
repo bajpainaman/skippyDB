@@ -126,7 +126,7 @@ fn get_ciphers(
         return (vec, Arc::new(None), None);
     }
 
-    let _aes_keys = aes_keys.as_ref().unwrap();
+    let _aes_keys = aes_keys.as_ref().expect("aes_keys must be Some when tee_cipher is enabled");
     if _aes_keys.len() != 96 {
         panic!("Invalid length for aes_keys");
     }
@@ -262,15 +262,15 @@ impl AdsCore {
 
         // wait for the request to be handled
         let (lock, cvar) = &*pair;
-        let mut sn_proof = lock.lock().unwrap();
+        let mut sn_proof = lock.lock().expect("lock poisoned: proof_request_mutex");
         while sn_proof.1.is_none() {
-            sn_proof = cvar.wait(sn_proof).unwrap();
+            sn_proof = cvar.wait(sn_proof).expect("lock poisoned: proof_request_condvar");
         }
 
-        if let Err(er) = sn_proof.1.as_ref().unwrap() {
+        if let Err(er) = sn_proof.1.as_ref().expect("proof result must be Some after condvar wait") {
             return Err(format!("get proof failed: {:?}", er));
         }
-        sn_proof.1.take().unwrap()
+        sn_proof.1.take().expect("proof result must be Some after condvar wait")
     }
 
     pub fn get_entry_files(&self) -> Vec<Arc<EntryFile>> {
@@ -299,7 +299,7 @@ impl AdsCore {
             let meta = meta.clone();
             let data_dir = data_dir.clone();
             let indexer = indexer.clone();
-            let cipher = ciphers.pop_front().unwrap();
+            let cipher = ciphers.pop_front().expect("cipher deque exhausted during recovery");
             let handle = thread::spawn(move || {
                 let meta = meta.read_arc();
                 let (tree, ef_prune_to, oldest_active_sn) = Self::recover_tree(
@@ -323,7 +323,7 @@ impl AdsCore {
         let mut result = Vec::with_capacity(SENTRY_COUNT);
         for _shard_id in 0..SHARD_COUNT {
             let handle = recover_handles.remove(0);
-            let (tree, oldest_active_sn) = handle.join().unwrap();
+            let (tree, oldest_active_sn) = handle.join().expect("recover_tree thread panicked");
             result.push((tree, oldest_active_sn));
         }
         debug!("finish recover_tree");
@@ -345,7 +345,7 @@ impl AdsCore {
         for shard_id in 0..SHARD_COUNT {
             let meta = meta.clone();
             let data_dir = data_dir.clone();
-            let cipher = ciphers.pop_front().unwrap();
+            let cipher = ciphers.pop_front().expect("cipher deque exhausted during recovery");
             let handle = thread::spawn(move || {
                 let meta = meta.read_arc();
                 let (tree, ef_prune_to, oldest_active_sn) = Self::recover_tree(
@@ -367,7 +367,7 @@ impl AdsCore {
         let mut result = Vec::with_capacity(SENTRY_COUNT);
         for shard_id in 0..SHARD_COUNT {
             let handle = recover_handles.remove(0);
-            let (tree, ef_prune_to, oldest_active_sn) = handle.join().unwrap();
+            let (tree, ef_prune_to, oldest_active_sn) = handle.join().expect("recover_tree thread panicked");
 
             Self::index_tree(&tree, oldest_active_sn, ef_prune_to, &indexer);
             indexer.dump_mem_to_file(shard_id);
@@ -458,9 +458,9 @@ impl AdsCore {
         let (data_dir, meta_dir, _indexer_dir) = Self::get_sub_dirs(dir);
 
         if Path::new(dir).exists() {
-            fs::remove_dir_all(dir).unwrap();
+            fs::remove_dir_all(dir).expect("I/O failed: remove_dir_all for init_dir");
         }
-        fs::create_dir(dir).unwrap();
+        fs::create_dir(dir).expect("I/O failed: create_dir for init_dir");
         let (mut ciphers, _, meta_db_cipher) = get_ciphers(aes_keys);
         let mut meta = MetaDB::with_dir(&meta_dir, meta_db_cipher);
         for shard_id in 0..SHARD_COUNT {
@@ -471,12 +471,12 @@ impl AdsCore {
                 data_dir.clone(),
                 format!("{}", shard_id),
                 with_twig_file,
-                ciphers.pop_front().unwrap(),
+                ciphers.pop_front().expect("cipher deque exhausted during init"),
             );
             let mut bz = [0u8; DEFAULT_ENTRY_SIZE];
             for sn in 0..SENTRY_COUNT {
                 let e = sentry_entry(shard_id, sn as u64, &mut bz[..]);
-                tree.append_entry(&e).unwrap();
+                tree.append_entry(&e).expect("I/O failed: append sentry entry during init");
             }
             tree.flush_files(0, 0);
             let (entry_file_size, twig_file_size) = tree.get_file_sizes();
@@ -547,7 +547,7 @@ impl AdsCore {
         idx.for_each_value(height, key_hash, |file_pos| -> bool {
             let mut buf_too_small = false;
             if cache.is_some() {
-                cache.unwrap().lookup(shard_id, file_pos, |entry_bz| {
+                cache.expect("cache must be Some when is_some check passed").lookup(shard_id, file_pos, |entry_bz| {
                     found_it = Self::check_entry(key_hash, key, &entry_bz);
                     if found_it {
                         size = entry_bz.len();
@@ -569,7 +569,7 @@ impl AdsCore {
             let entry_bz = EntryBz { bz: &buf[..size] };
             found_it = Self::check_entry(key_hash, key, &entry_bz);
             if found_it && cache.is_some() {
-                cache.unwrap().insert(shard_id, file_pos, &entry_bz);
+                cache.expect("cache must be Some when is_some check passed").insert(shard_id, file_pos, &entry_bz);
             }
             found_it // stop loop if key matches
         });
@@ -578,7 +578,7 @@ impl AdsCore {
 
     pub fn add_task(&self, task_id: i64) {
         for sender in &self.task_senders {
-            sender.send(task_id).unwrap();
+            sender.send(task_id).expect("channel closed: task_sender");
         }
     }
 
@@ -792,7 +792,7 @@ impl<T: Task + 'static> AdsWrap<T> {
     pub fn flush(&mut self) -> Vec<Arc<MetaInfo>> {
         let mut v = Vec::with_capacity(2);
         while self.task_hub.free_slot_count() < 2 {
-            let meta_info = self.end_block_chan.recv().unwrap();
+            let meta_info = self.end_block_chan.recv().expect("channel closed: end_block_chan during flush");
             self.task_hub.end_block(meta_info.curr_height);
             v.push(meta_info);
         }
@@ -834,7 +834,7 @@ impl<T: Task + 'static> AdsWrap<T> {
         let mut meta_info = Option::None;
         if self.task_hub.free_slot_count() == 0 {
             // adscore and task_hub are busy, wait for them to finish an old block
-            let _meta_info = self.end_block_chan.recv().unwrap();
+            let _meta_info = self.end_block_chan.recv().expect("channel closed: end_block_chan during start_block");
             self.task_hub.end_block(_meta_info.curr_height);
             meta_info = Some(_meta_info);
         }
