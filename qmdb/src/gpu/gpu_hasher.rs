@@ -65,7 +65,9 @@ pub struct GpuPending<'a> {
 impl<'a> GpuPending<'a> {
     /// Block until the async computation completes and return results.
     pub fn wait(self) -> Vec<[u8; 32]> {
-        result::stream::synchronize(self.stream.stream)
+        // Safety: synchronize is a blocking FFI call on a valid CUDA stream handle.
+        // The stream is owned by GpuHasher and only accessed under serialization.
+        unsafe { result::stream::synchronize(self.stream.stream) }
             .expect("GPU async stream sync failed");
         let hashes: &[[u8; 32]] =
             bytemuck::cast_slice(&self.async_bufs.h_node_output[..self.count * 32]);
@@ -75,7 +77,8 @@ impl<'a> GpuPending<'a> {
     /// Block until complete, writing results directly into caller's buffer.
     pub fn wait_into(self, out: &mut [[u8; 32]]) {
         assert_eq!(self.count, out.len(), "pending count and output mismatch");
-        result::stream::synchronize(self.stream.stream)
+        // Safety: synchronize is a blocking FFI call on a valid CUDA stream handle.
+        unsafe { result::stream::synchronize(self.stream.stream) }
             .expect("GPU async stream sync failed");
         let hashes: &[[u8; 32]] =
             bytemuck::cast_slice(&self.async_bufs.h_node_output[..self.count * 32]);
@@ -107,6 +110,12 @@ pub struct GpuHasher {
     async_stream: CudaStream,
     async_bufs: AsyncGpuBuffers,
 }
+
+// Safety: GpuHasher operations are serialized by the internal Mutex on `bufs`.
+// The CudaStream raw pointer is only accessed through cudarc's safe API and
+// the async_stream is only used via GpuPending which borrows &self.
+unsafe impl Send for GpuHasher {}
+unsafe impl Sync for GpuHasher {}
 
 impl GpuHasher {
     /// Returns the number of available CUDA devices.
