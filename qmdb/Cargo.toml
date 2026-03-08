@@ -30,7 +30,7 @@ xxhash-rust = { version = "0.8.10", features = ["xxh32", "xxh3"] }
 threadpool = "1.8.1"
 atomptr = "1.4.1"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
-time = ">=0.3.36, <0.3.37"
+time = ">=0.3.36"
 rayon = "1.10.0"
 dashmap = "6.0.0-rc.1"
 parking_lot = { version = "0.12.1", features = ["arc_lock"] }
