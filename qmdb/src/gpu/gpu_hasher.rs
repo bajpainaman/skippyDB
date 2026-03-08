@@ -137,9 +137,15 @@ impl GpuHasher {
         let device = CudaDevice::new_with_stream(ordinal)
             .map_err(|e| format!("CUDA device {} init failed: {}", ordinal, e))?;
 
-        // Compile PTX from CUDA source at runtime via NVRTC
-        let ptx = cudarc::nvrtc::compile_ptx(PTX_SRC)
-            .map_err(|e| format!("NVRTC compilation failed: {}", e))?;
+        // Compile PTX from CUDA source at runtime via NVRTC.
+        // -I/usr/include so NVRTC can resolve stdint.h on Linux.
+        let ptx = cudarc::nvrtc::compile_ptx_with_opts(
+            PTX_SRC,
+            cudarc::nvrtc::CompileOptions {
+                options: vec!["-I/usr/include".to_string()],
+                ..Default::default()
+            },
+        ).map_err(|e| format!("NVRTC compilation failed: {}", e))?;
 
         device
             .load_ptx(
