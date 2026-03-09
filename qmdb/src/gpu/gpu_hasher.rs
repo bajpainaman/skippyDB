@@ -138,18 +138,10 @@ impl GpuHasher {
             .map_err(|e| format!("CUDA device {} init failed: {}", ordinal, e))?;
 
         // Compile PTX from CUDA source at runtime via NVRTC.
-        // NVRTC doesn't inherit system include paths — pass them explicitly
-        // so stdint.h and its glibc internals (bits/) resolve on Linux.
-        let ptx = cudarc::nvrtc::compile_ptx_with_opts(
-            PTX_SRC,
-            cudarc::nvrtc::CompileOptions {
-                options: vec![
-                    "-I/usr/include".to_string(),
-                    "-I/usr/include/x86_64-linux-gnu".to_string(),
-                ],
-                ..Default::default()
-            },
-        ).map_err(|e| format!("NVRTC compilation failed: {}", e))?;
+        // The kernel uses inline typedefs instead of #include <stdint.h>,
+        // so no system include paths are needed.
+        let ptx = cudarc::nvrtc::compile_ptx(PTX_SRC)
+            .map_err(|e| format!("NVRTC compilation failed: {}", e))?;
 
         device
             .load_ptx(

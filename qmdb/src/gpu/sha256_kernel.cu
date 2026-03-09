@@ -3,7 +3,11 @@
 //   1. Fixed 65-byte node hashing: SHA256(level_byte || left_32B || right_32B)
 //   2. Variable-length entry hashing: SHA256(entry_payload)
 
-#include <stdint.h>
+// Inline typedefs instead of #include <stdint.h> to avoid NVRTC
+// needing glibc system headers (bits/, gnu/stubs-32.h, etc.)
+typedef unsigned char      uint8_t;
+typedef unsigned int        uint32_t;
+typedef unsigned long long  uint64_t;
 
 // SHA256 round constants
 __constant__ uint32_t K[64] = {
