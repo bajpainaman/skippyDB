@@ -110,36 +110,6 @@ __device__ void sha256_compress(uint32_t state[8], const uint8_t block[64]) {
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 
-// Device function: SHA256 of exactly 65 bytes (level || left || right).
-// Writes 32-byte hash to `output`.
-__device__ void sha256_65b(uint8_t level, const uint8_t* left, const uint8_t* right, uint8_t* output) {
-    uint32_t state[8];
-    #pragma unroll
-    for (int i = 0; i < 8; i++) state[i] = H_INIT[i];
-
-    // Block 1: [level(1) | left(32) | right[0..31](31)] = 64 bytes
-    uint8_t block1[64];
-    block1[0] = level;
-    #pragma unroll
-    for (int i = 0; i < 32; i++) block1[1 + i] = left[i];
-    #pragma unroll
-    for (int i = 0; i < 31; i++) block1[33 + i] = right[i];
-    sha256_compress(state, block1);
-
-    // Block 2: right[31] + padding + length(520 bits = 0x208)
-    uint8_t block2[64];
-    block2[0] = right[31];
-    block2[1] = 0x80;
-    #pragma unroll
-    for (int i = 2; i < 56; i++) block2[i] = 0;
-    block2[56] = 0; block2[57] = 0; block2[58] = 0; block2[59] = 0;
-    block2[60] = 0; block2[61] = 0; block2[62] = 0x02; block2[63] = 0x08;
-    sha256_compress(state, block2);
-
-    #pragma unroll
-    for (int i = 0; i < 8; i++) store_be32(&output[i * 4], state[i]);
-}
-
 // ============================================================
 // Kernel 1: Fixed 65-byte node hash
 // Input:  jobs[N * 65] = N entries of [level(1B) | left(32B) | right(32B)]
