@@ -191,6 +191,40 @@ impl EntryFileWithPreReader {
             pos += entry.len() as i64;
         }
     }
+
+    /// Sister function of `scan_entries_lite` that yields the full `(key,
+    /// value, serial_number, file_pos)` of each entry to the callback.
+    ///
+    /// The callback returns `true` to continue scanning or `false` to stop
+    /// early. This is used by `AdsCore::for_each_active_entry` to rebuild
+    /// in-memory state from disk on restart.
+    pub fn scan_entries_full<F>(&mut self, start_pos: i64, mut access: F)
+    where
+        F: FnMut(&[u8], &[u8], u64, i64) -> bool,
+    {
+        let mut pos = start_pos;
+        let size = self.entry_file.size();
+        let size_on_disk = self.entry_file.size_on_disk();
+        let mut buf = Vec::with_capacity(DEFAULT_ENTRY_SIZE);
+
+        while pos < size {
+            let read_len = self.read_entry(pos, size, &mut buf).unwrap();
+            if read_len == 0 {
+                panic!(
+                    "scan_entries_full: met file end when reading at {}, size={}, size_on_disk={}, start_pos={}",
+                    pos, size, size_on_disk, start_pos
+                );
+            }
+            let entry = EntryBz { bz: &buf[..] };
+            let entry_len = entry.len() as i64;
+            let keep_going =
+                access(entry.key(), entry.value(), entry.serial_number(), pos);
+            pos += entry_len;
+            if !keep_going {
+                break;
+            }
+        }
+    }
 }
 
 pub struct EntryFileWriter {

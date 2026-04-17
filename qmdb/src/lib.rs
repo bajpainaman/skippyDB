@@ -76,7 +76,7 @@ use crate::def::{
     COMPACT_RING_SIZE, DEFAULT_ENTRY_SIZE, IN_BLOCK_IDX_BITS, SENTRY_COUNT, SHARD_COUNT, SHARD_DIV,
     TWIG_SHIFT,
 };
-use crate::entryfile::{entry::sentry_entry, EntryBz, EntryCache, EntryFile};
+use crate::entryfile::{entry::sentry_entry, EntryBz, EntryCache, EntryFile, EntryFileWithPreReader};
 use crate::flusher::{Flusher, FlusherShard, ProofReqElem};
 use crate::indexer::Indexer;
 use crate::merkletree::{
@@ -435,6 +435,39 @@ impl AdsCore {
                 }
             },
         );
+    }
+
+    /// Streams every ACTIVE entry in the given shard to `callback` as
+    /// `(key, value)` slices. The callback returns `true` to continue or
+    /// `false` to stop early.
+    ///
+    /// This is intended for startup-time state rebuild by downstream
+    /// consumers (e.g. the ETO UVM), not for concurrent use with a live
+    /// write pipeline. Sentry and null entries (empty key) are skipped.
+    ///
+    /// Active entries are identified by consulting the `Indexer`: an entry
+    /// at position `P` with key-hash `K` is yielded iff the indexer still
+    /// tracks `(K[..10], P)` as a live mapping. The indexer is kept in
+    /// sync with create / update / delete operations by the updater, so
+    /// only the latest version of each live key is observed.
+    pub fn for_each_active_entry<F>(&self, shard_id: usize, mut callback: F)
+    where
+        F: FnMut(&[u8], &[u8]) -> bool,
+    {
+        let start_pos = self.meta.read().get_oldest_active_file_pos(shard_id);
+        let entry_file = &self.entry_files[shard_id];
+        let mut reader = EntryFileWithPreReader::new(entry_file);
+        reader.scan_entries_full(start_pos, |key, value, sn, pos| -> bool {
+            // Skip sentry and null entries (they have empty keys).
+            if key.is_empty() {
+                return true;
+            }
+            let key_hash = hasher::hash(key);
+            if !self.indexer.key_exists(&key_hash[..10], pos, sn) {
+                return true;
+            }
+            callback(key, value)
+        });
     }
 
     pub fn init_dir(config: &config::Config) {
@@ -853,6 +886,17 @@ impl<T: Task + 'static> AdsWrap<T> {
 
     pub fn get_metadb(&self) -> Arc<RwLock<MetaDB>> {
         self.ads.get_metadb()
+    }
+
+    /// Mirror of [`AdsCore::for_each_active_entry`]. Streams every active
+    /// `(key, value)` in the given shard to `callback` for downstream
+    /// state rebuild on restart. See `AdsCore::for_each_active_entry`
+    /// for semantics and constraints.
+    pub fn for_each_active_entry<F>(&self, shard_id: usize, callback: F)
+    where
+        F: FnMut(&[u8], &[u8]) -> bool,
+    {
+        self.ads.for_each_active_entry(shard_id, callback);
     }
 }
 
