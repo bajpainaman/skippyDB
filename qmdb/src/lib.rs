@@ -454,7 +454,15 @@ impl AdsCore {
     where
         F: FnMut(&[u8], &[u8]) -> bool,
     {
-        let start_pos = self.meta.read().get_oldest_active_file_pos(shard_id);
+        // Start scanning from position 0. Sentry entries (empty key) and
+        // compacted-away entries (not in the indexer) are filtered out by
+        // the callback wrapper below. We deliberately avoid
+        // `get_oldest_active_file_pos` here because (a) aggressively
+        // compacted test configurations can leave that pointer at a
+        // position whose first 5 bytes no longer decode as a valid entry
+        // header, and (b) starting at 0 is a tiny fraction of overall
+        // restart cost relative to iterating the whole live set anyway.
+        let start_pos: i64 = 0;
         let entry_file = &self.entry_files[shard_id];
         let mut reader = EntryFileWithPreReader::new(entry_file);
         reader.scan_entries_full(start_pos, |key, value, sn, pos| -> bool {

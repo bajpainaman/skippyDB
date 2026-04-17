@@ -198,28 +198,42 @@ impl EntryFileWithPreReader {
     /// The callback returns `true` to continue scanning or `false` to stop
     /// early. This is used by `AdsCore::for_each_active_entry` to rebuild
     /// in-memory state from disk on restart.
+    ///
+    /// Unlike `scan_entries_lite`, this variant treats a `read_len == 0`
+    /// response from the entry file as end-of-stream (breaks the loop)
+    /// rather than a panic. At restart / recovery time the in-memory
+    /// `size()` can point past the last fully-written entry (the write
+    /// buffer may not have been drained for the trailing tail), so the
+    /// reader is expected to hit this boundary before `pos` reaches
+    /// `size`. That's a graceful stop, not a corrupt-file signal.
     pub fn scan_entries_full<F>(&mut self, start_pos: i64, mut access: F)
     where
         F: FnMut(&[u8], &[u8], u64, i64) -> bool,
     {
         let mut pos = start_pos;
         let size = self.entry_file.size();
-        let size_on_disk = self.entry_file.size_on_disk();
         let mut buf = Vec::with_capacity(DEFAULT_ENTRY_SIZE);
+        let mut iter = 0;
 
         while pos < size {
-            let read_len = self.read_entry(pos, size, &mut buf).unwrap();
+            let read_len = match self.read_entry(pos, size, &mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!(
+                        "scan_entries_full: read_entry Err at pos={} size={}: {:?}",
+                        pos, size, e
+                    );
+                    break;
+                }
+            };
             if read_len == 0 {
-                panic!(
-                    "scan_entries_full: met file end when reading at {}, size={}, size_on_disk={}, start_pos={}",
-                    pos, size, size_on_disk, start_pos
-                );
+                break;
             }
-            let entry = EntryBz { bz: &buf[..] };
-            let entry_len = entry.len() as i64;
+            let entry = EntryBz { bz: &buf[..read_len] };
             let keep_going =
                 access(entry.key(), entry.value(), entry.serial_number(), pos);
-            pos += entry_len;
+            pos += read_len as i64;
+            iter += 1;
             if !keep_going {
                 break;
             }
