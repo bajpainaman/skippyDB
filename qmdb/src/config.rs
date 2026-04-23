@@ -1,3 +1,5 @@
+use crate::topology::Topology;
+
 pub const COMPACT_THRES: i64 = 20000000;
 pub const UTILIZATION_RATIO: i64 = 7;
 pub const UTILIZATION_DIV: i64 = 10;
@@ -22,6 +24,11 @@ pub struct Config {
     pub uring_count: usize,
     pub uring_size: u32,
     pub sub_id_chan_size: usize,
+    /// Runtime shape: shard count + workers-per-shard. Phase 2.3a stores it
+    /// on the config but the internals still rely on the compile-time
+    /// `SHARD_COUNT` for fixed arrays — `Topology::new` asserts they match.
+    /// Phase 2.3b is where runtime-variable shard counts start working.
+    pub topology: Topology,
 }
 
 impl Default for Config {
@@ -40,6 +47,7 @@ impl Default for Config {
             uring_count: URING_COUNT,
             uring_size: URING_SIZE,
             sub_id_chan_size: SUB_ID_CHAN_SIZE,
+            topology: Topology::compile_time(),
         }
     }
 }
@@ -74,6 +82,7 @@ impl Config {
             uring_count,
             uring_size,
             sub_id_chan_size,
+            topology: Topology::compile_time(),
         }
     }
 

@@ -50,6 +50,7 @@ pub mod metadb;
 pub mod seqads;
 pub mod stateless;
 pub mod tasks;
+pub mod topology;
 #[cfg(not(all(target_os = "linux", feature = "directio")))]
 pub mod uniprefetcher;
 pub mod updater;
