@@ -13,23 +13,46 @@ use crate::gpu::GpuHasher;
 #[cfg(feature = "cuda")]
 use crate::gpu::GpuNodeStore;
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread;
 
 type RocksMetaDB = MetaDB;
 
+/// Per-block coordination between the N shard threads.
+///
+/// - `flush_bar` — entry-append synchronization before the Merkle sync kicks off.
+/// - `commit_counter` — initialized to `shard_count`; each shard fetches-and-
+///   decrements after writing its per-shard `MetaInfo` fields. The shard that
+///   sees the decrement return `1` is "last to arrive" and fires the
+///   block-level `commit_async()` plus `end_block_chan` send. Replaces the
+///   old double-`metadb_bar.wait()` dance where shard 0 was hardcoded as the
+///   committer.
 pub struct BarrierSet {
     pub flush_bar: Barrier,
-    pub metadb_bar: Barrier,
+    commit_counter: AtomicUsize,
 }
 
 impl BarrierSet {
     pub fn new(n: usize) -> Self {
         Self {
             flush_bar: Barrier::new(n),
-            metadb_bar: Barrier::new(n),
+            commit_counter: AtomicUsize::new(n),
         }
+    }
+
+    /// Returns `true` for exactly one shard per block: the last one to call.
+    /// That shard is responsible for `set_curr_height` + `commit_async` + the
+    /// `end_block_chan.send`. All other shards just drop their write guard.
+    ///
+    /// Call this while holding the `meta` write guard: since the guard
+    /// serializes lock acquisitions across shards, the caller that sees `true`
+    /// is guaranteed that all other shards have already written their
+    /// per-shard fields under the same lock.
+    #[inline]
+    pub fn is_last_to_commit(&self) -> bool {
+        self.commit_counter.fetch_sub(1, Ordering::AcqRel) == 1
     }
 }
 
@@ -275,47 +298,41 @@ impl FlusherShard {
                         upper_tree.prune_nodes(start_twig_id, end_twig_id, youngest_twig_id);
                 }
 
-                //shard#0 must wait other shards to finish
-                if shard_id == 0 {
-                    bar_set.metadb_bar.wait();
-                }
-
-                let mut meta = meta.write_arc();
+                // All shards write their per-shard fields under the Arc<RwLock>;
+                // the lock serializes them. The last shard to fetch-and-decrement
+                // the commit counter fires the block-level commit_async in the
+                // same lock session (guaranteeing all 15 other shards' writes
+                // are already persisted to MetaInfo under this same lock).
+                let mut guard = meta.write_arc();
                 if !edge_nodes_bytes.is_empty() {
-                    meta.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
-                    meta.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
+                    guard.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
+                    guard.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
                 }
-                meta.set_root_hash(shard_id, root_hash);
-                meta.set_oldest_active_sn(shard_id, compact_done_sn);
-                meta.set_oldest_active_file_pos(shard_id, compact_done_pos);
-                meta.set_next_serial_num(shard_id, sn_end);
+                guard.set_root_hash(shard_id, root_hash);
+                guard.set_oldest_active_sn(shard_id, compact_done_sn);
+                guard.set_oldest_active_file_pos(shard_id, compact_done_pos);
+                guard.set_next_serial_num(shard_id, sn_end);
                 if curr_height % PRUNE_EVERY_NBLOCKS == 0 {
-                    meta.set_first_twig_at_height(
+                    guard.set_first_twig_at_height(
                         shard_id,
                         curr_height,
                         compact_done_sn / (LEAF_COUNT_IN_TWIG as u64),
                         compact_done_pos,
                     )
                 }
-                meta.set_entry_file_size(shard_id, entry_file_size);
-                meta.set_twig_file_size(shard_id, twig_file_size);
+                guard.set_entry_file_size(shard_id, entry_file_size);
+                guard.set_twig_file_size(shard_id, twig_file_size);
 
-                if shard_id == 0 {
-                    meta.set_curr_height(curr_height);
-                    let meta_info = meta.commit();
-                    drop(meta);
-                    match end_block_chan.send(meta_info) {
-                        Ok(_) => {
-                            //println!("{} end block", curr_height);
-                        }
-                        Err(_) => {
-                            println!("end block sender exit!");
-                            return;
-                        }
+                if bar_set.is_last_to_commit() {
+                    guard.set_curr_height(curr_height);
+                    let meta_info = guard.commit_async();
+                    drop(guard);
+                    if end_block_chan.send(meta_info).is_err() {
+                        println!("end block sender exit!");
+                        return;
                     }
                 } else {
-                    drop(meta);
-                    bar_set.metadb_bar.wait();
+                    drop(guard);
                 }
                 upper_tree_sender.send(upper_tree).unwrap();
             });
@@ -376,46 +393,36 @@ impl FlusherShard {
 
             self.handle_proof_req();
 
-            //shard#0 must wait other shards to finish
-            if shard_id == 0 {
-                bar_set.metadb_bar.wait();
-            }
-
-            let mut meta = meta.write_arc();
+            // Countdown-gated commit; see BarrierSet::is_last_to_commit.
+            let mut guard = meta.write_arc();
             if !edge_nodes_bytes.is_empty() {
-                meta.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
-                meta.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
+                guard.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
+                guard.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
             }
-            meta.set_root_hash(shard_id, root_hash);
-            meta.set_oldest_active_sn(shard_id, compact_done_sn);
-            meta.set_oldest_active_file_pos(shard_id, compact_done_pos);
-            meta.set_next_serial_num(shard_id, sn_end);
+            guard.set_root_hash(shard_id, root_hash);
+            guard.set_oldest_active_sn(shard_id, compact_done_sn);
+            guard.set_oldest_active_file_pos(shard_id, compact_done_pos);
+            guard.set_next_serial_num(shard_id, sn_end);
             if curr_height % PRUNE_EVERY_NBLOCKS == 0 {
-                meta.set_first_twig_at_height(
+                guard.set_first_twig_at_height(
                     shard_id,
                     curr_height,
                     compact_done_sn / (LEAF_COUNT_IN_TWIG as u64),
                     compact_done_pos,
                 )
             }
-            meta.set_entry_file_size(shard_id, entry_file_size);
-            meta.set_twig_file_size(shard_id, twig_file_size);
+            guard.set_entry_file_size(shard_id, entry_file_size);
+            guard.set_twig_file_size(shard_id, twig_file_size);
 
-            if shard_id == 0 {
-                meta.set_curr_height(curr_height);
-                let meta_info = meta.commit();
-                drop(meta);
-                match end_block_chan.send(meta_info) {
-                    Ok(_) => {
-                        //println!("{} end block", curr_height);
-                    }
-                    Err(_) => {
-                        println!("end block sender exit!");
-                    }
+            if bar_set.is_last_to_commit() {
+                guard.set_curr_height(curr_height);
+                let meta_info = guard.commit_async();
+                drop(guard);
+                if end_block_chan.send(meta_info).is_err() {
+                    println!("end block sender exit!");
                 }
             } else {
-                drop(meta);
-                bar_set.metadb_bar.wait();
+                drop(guard);
             }
         }
     }
@@ -516,43 +523,36 @@ impl FlusherShard {
 
             self.handle_proof_req();
 
-            if shard_id == 0 {
-                bar_set.metadb_bar.wait();
-            }
-
-            let mut meta = meta.write_arc();
+            // Countdown-gated commit; see BarrierSet::is_last_to_commit.
+            let mut guard = meta.write_arc();
             if !edge_nodes_bytes.is_empty() {
-                meta.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
-                meta.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
+                guard.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
+                guard.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
             }
-            meta.set_root_hash(shard_id, root_hash);
-            meta.set_oldest_active_sn(shard_id, compact_done_sn);
-            meta.set_oldest_active_file_pos(shard_id, compact_done_pos);
-            meta.set_next_serial_num(shard_id, sn_end);
+            guard.set_root_hash(shard_id, root_hash);
+            guard.set_oldest_active_sn(shard_id, compact_done_sn);
+            guard.set_oldest_active_file_pos(shard_id, compact_done_pos);
+            guard.set_next_serial_num(shard_id, sn_end);
             if curr_height % PRUNE_EVERY_NBLOCKS == 0 {
-                meta.set_first_twig_at_height(
+                guard.set_first_twig_at_height(
                     shard_id,
                     curr_height,
                     compact_done_sn / (LEAF_COUNT_IN_TWIG as u64),
                     compact_done_pos,
                 )
             }
-            meta.set_entry_file_size(shard_id, entry_file_size);
-            meta.set_twig_file_size(shard_id, twig_file_size);
+            guard.set_entry_file_size(shard_id, entry_file_size);
+            guard.set_twig_file_size(shard_id, twig_file_size);
 
-            if shard_id == 0 {
-                meta.set_curr_height(curr_height);
-                let meta_info = meta.commit();
-                drop(meta);
-                match end_block_chan.send(meta_info) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        println!("end block sender exit!");
-                    }
+            if bar_set.is_last_to_commit() {
+                guard.set_curr_height(curr_height);
+                let meta_info = guard.commit_async();
+                drop(guard);
+                if end_block_chan.send(meta_info).is_err() {
+                    println!("end block sender exit!");
                 }
             } else {
-                drop(meta);
-                bar_set.metadb_bar.wait();
+                drop(guard);
             }
         }
     }
@@ -664,43 +664,36 @@ impl FlusherShard {
 
             self.handle_proof_req();
 
-            if shard_id == 0 {
-                bar_set.metadb_bar.wait();
-            }
-
-            let mut meta = meta.write_arc();
+            // Countdown-gated commit; see BarrierSet::is_last_to_commit.
+            let mut guard = meta.write_arc();
             if !edge_nodes_bytes.is_empty() {
-                meta.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
-                meta.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
+                guard.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
+                guard.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
             }
-            meta.set_root_hash(shard_id, root_hash);
-            meta.set_oldest_active_sn(shard_id, compact_done_sn);
-            meta.set_oldest_active_file_pos(shard_id, compact_done_pos);
-            meta.set_next_serial_num(shard_id, sn_end);
+            guard.set_root_hash(shard_id, root_hash);
+            guard.set_oldest_active_sn(shard_id, compact_done_sn);
+            guard.set_oldest_active_file_pos(shard_id, compact_done_pos);
+            guard.set_next_serial_num(shard_id, sn_end);
             if curr_height % PRUNE_EVERY_NBLOCKS == 0 {
-                meta.set_first_twig_at_height(
+                guard.set_first_twig_at_height(
                     shard_id,
                     curr_height,
                     compact_done_sn / (LEAF_COUNT_IN_TWIG as u64),
                     compact_done_pos,
                 )
             }
-            meta.set_entry_file_size(shard_id, entry_file_size);
-            meta.set_twig_file_size(shard_id, twig_file_size);
+            guard.set_entry_file_size(shard_id, entry_file_size);
+            guard.set_twig_file_size(shard_id, twig_file_size);
 
-            if shard_id == 0 {
-                meta.set_curr_height(curr_height);
-                let meta_info = meta.commit();
-                drop(meta);
-                match end_block_chan.send(meta_info) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        println!("end block sender exit!");
-                    }
+            if bar_set.is_last_to_commit() {
+                guard.set_curr_height(curr_height);
+                let meta_info = guard.commit_async();
+                drop(guard);
+                if end_block_chan.send(meta_info).is_err() {
+                    println!("end block sender exit!");
                 }
             } else {
-                drop(meta);
-                bar_set.metadb_bar.wait();
+                drop(guard);
             }
         }
     }
