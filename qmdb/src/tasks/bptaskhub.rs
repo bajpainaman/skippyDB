@@ -7,13 +7,39 @@ use atomptr::{AtomPtr, Ref};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+/// Number of block commits that can be in-flight through the flusher pipeline
+/// at once. Phase 1.2 raised this from 2 to 4.
+///
+/// Each additional slot costs: one `Arc<TasksManager<T>>`, one
+/// `Arc<EntryCache>`, and one `AtomicI64` height. At steady state it lets the
+/// updater/flusher overlap more of the block-commit tail (async MetaDB write,
+/// background commit thread, next block's prefetch) before blocking on
+/// `end_block_chan.recv()`.
+pub const BLOCK_PIPELINE_DEPTH: usize = 4;
+
+/// One in-flight block's state: its task list, the height it's on (or `-1` if
+/// the slot is idle), and the entry cache it filled during updater work.
+struct Slot<T: Task> {
+    tasks: AtomPtr<Arc<TasksManager<T>>>,
+    height: AtomicI64,
+    cache: AtomPtr<Arc<EntryCache>>,
+}
+
+impl<T: Task> Slot<T> {
+    fn new() -> Self {
+        Self {
+            tasks: AtomPtr::new(Arc::new(TasksManager::<T>::default())),
+            height: AtomicI64::new(-1),
+            cache: AtomPtr::new(Arc::new(EntryCache::new_uninit())),
+        }
+    }
+}
+
+/// Ring of `BLOCK_PIPELINE_DEPTH` block-in-flight slots. The struct name is
+/// kept for API stability through Phase 1; it will be renamed to
+/// `BlockRingTaskHub<N>` in Phase 3.4 when the depth is made configurable.
 pub struct BlockPairTaskHub<T: Task> {
-    tasks_in_blk0: AtomPtr<Arc<TasksManager<T>>>,
-    tasks_in_blk1: AtomPtr<Arc<TasksManager<T>>>,
-    height0: AtomicI64,
-    height1: AtomicI64,
-    cache0: AtomPtr<Arc<EntryCache>>,
-    cache1: AtomPtr<Arc<EntryCache>>,
+    slots: [Slot<T>; BLOCK_PIPELINE_DEPTH],
 }
 
 impl<T: Task> Default for BlockPairTaskHub<T> {
@@ -25,36 +51,23 @@ impl<T: Task> Default for BlockPairTaskHub<T> {
 impl<T: Task> BlockPairTaskHub<T> {
     pub fn new() -> Self {
         Self {
-            tasks_in_blk0: AtomPtr::new(Arc::new(TasksManager::<T>::default())),
-            tasks_in_blk1: AtomPtr::new(Arc::new(TasksManager::<T>::default())),
-            height0: AtomicI64::new(-1),
-            height1: AtomicI64::new(-1),
-            cache0: AtomPtr::new(Arc::new(EntryCache::new_uninit())),
-            cache1: AtomPtr::new(Arc::new(EntryCache::new_uninit())),
+            slots: [Slot::new(), Slot::new(), Slot::new(), Slot::new()],
         }
     }
 
     pub fn free_slot_count(&self) -> usize {
-        let mut count = 0;
-        if self.height0.load(Ordering::SeqCst) < 0 {
-            count += 1;
-        }
-        if self.height1.load(Ordering::SeqCst) < 0 {
-            count += 1;
-        }
-        count
+        self.slots
+            .iter()
+            .filter(|s| s.height.load(Ordering::SeqCst) < 0)
+            .count()
     }
 
     pub fn end_block(&self, height: i64) {
-        let height0 = self.height0.load(Ordering::SeqCst);
-        if height0 == height {
-            self.height0.store(-1, Ordering::SeqCst);
-            return;
-        }
-        let height1 = self.height1.load(Ordering::SeqCst);
-        if height1 == height {
-            self.height1.store(-1, Ordering::SeqCst);
-            return;
+        for slot in &self.slots {
+            if slot.height.load(Ordering::SeqCst) == height {
+                slot.height.store(-1, Ordering::SeqCst);
+                return;
+            }
         }
         panic!("no data found for height");
     }
@@ -65,74 +78,46 @@ impl<T: Task> BlockPairTaskHub<T> {
         tasks_in_blk: Arc<TasksManager<T>>,
         cache: Arc<EntryCache>,
     ) {
-        let height0 = self.height0.load(Ordering::SeqCst);
-        if height0 < 0 {
-            let old = self.tasks_in_blk0.swap(tasks_in_blk);
-            drop(old);
-            let old = self.cache0.swap(cache);
-            drop(old);
-            self.height0.store(height, Ordering::SeqCst);
-            return;
-        }
-        let height1 = self.height1.load(Ordering::SeqCst);
-        if height1 < 0 {
-            let old = self.tasks_in_blk1.swap(tasks_in_blk);
-            drop(old);
-            let old = self.cache1.swap(cache);
-            drop(old);
-            self.height1.store(height, Ordering::SeqCst);
-            return;
+        for slot in &self.slots {
+            if slot.height.load(Ordering::SeqCst) < 0 {
+                let old = slot.tasks.swap(tasks_in_blk);
+                drop(old);
+                let old = slot.cache.swap(cache);
+                drop(old);
+                slot.height.store(height, Ordering::SeqCst);
+                return;
+            }
         }
         panic!("no data found for height");
     }
 }
 
 impl<T: Task> TaskHub for BlockPairTaskHub<T> {
-    // updater in ads check this to known if a block is end.
+    // updater in ads check this to know if a block is end.
     fn check_begin_end(&self, task_id: i64) -> (Option<Arc<EntryCache>>, bool) {
-        let height0 = self.height0.load(Ordering::SeqCst);
-        if height0 == (task_id >> IN_BLOCK_IDX_BITS) {
-            let last_task_in_blk0 = self.tasks_in_blk0.get_ref().as_ref().get_last_task_id();
-            if (task_id & IN_BLOCK_IDX_MASK) != 0 {
-                return (None, last_task_in_blk0 == task_id); // not first task in block
+        let target_height = task_id >> IN_BLOCK_IDX_BITS;
+        for slot in &self.slots {
+            if slot.height.load(Ordering::SeqCst) == target_height {
+                let last_task_id = slot.tasks.get_ref().as_ref().get_last_task_id();
+                if (task_id & IN_BLOCK_IDX_MASK) != 0 {
+                    return (None, last_task_id == task_id); // not first task in block
+                }
+                // first task in block → return cache
+                let arc: Ref<Arc<EntryCache>> = slot.cache.get_ref();
+                let cache: Arc<EntryCache> = Arc::clone(&arc);
+                return (Some(cache), last_task_id == task_id);
             }
-            // when first task in block, return cache
-            let arc0: Ref<Arc<EntryCache>> = self.cache0.get_ref();
-            let cache0: Arc<EntryCache> = Arc::clone(&arc0);
-            return (Some(cache0.clone()), last_task_in_blk0 == task_id);
-        }
-        let height1 = self.height1.load(Ordering::SeqCst);
-        if height1 == (task_id >> IN_BLOCK_IDX_BITS) {
-            let last_task_in_blk1 = self.tasks_in_blk1.get_ref().as_ref().get_last_task_id();
-            if (task_id & IN_BLOCK_IDX_MASK) != 0 {
-                return (None, last_task_in_blk1 == task_id); // not first task in block
-            }
-            // when first task in block, return cache
-            let arc1: Ref<Arc<EntryCache>> = self.cache1.get_ref();
-            let cache1: Arc<EntryCache> = Arc::clone(&arc1);
-            return (Some(cache1.clone()), last_task_in_blk1 == task_id);
         }
         panic!("no data found for height");
     }
 
     fn get_change_sets(&self, task_id: i64) -> Arc<Vec<ChangeSet>> {
-        let height0 = self.height0.load(Ordering::SeqCst);
-        if height0 == (task_id >> IN_BLOCK_IDX_BITS) {
-            let idx = (task_id & IN_BLOCK_IDX_MASK) as usize;
-            return self
-                .tasks_in_blk0
-                .get_ref()
-                .as_ref()
-                .get_tasks_change_sets(idx);
-        }
-        let height1 = self.height1.load(Ordering::SeqCst);
-        if height1 == (task_id >> IN_BLOCK_IDX_BITS) {
-            let idx = (task_id & IN_BLOCK_IDX_MASK) as usize;
-            return self
-                .tasks_in_blk1
-                .get_ref()
-                .as_ref()
-                .get_tasks_change_sets(idx);
+        let target_height = task_id >> IN_BLOCK_IDX_BITS;
+        for slot in &self.slots {
+            if slot.height.load(Ordering::SeqCst) == target_height {
+                let idx = (task_id & IN_BLOCK_IDX_MASK) as usize;
+                return slot.tasks.get_ref().as_ref().get_tasks_change_sets(idx);
+            }
         }
         panic!("no data found for height");
     }
@@ -150,7 +135,7 @@ mod tests {
     #[test]
     fn test_initialize() {
         let hub: BlockPairTaskHub<SimpleTask> = BlockPairTaskHub::new();
-        assert_eq!(hub.free_slot_count(), 2);
+        assert_eq!(hub.free_slot_count(), BLOCK_PIPELINE_DEPTH);
     }
 
     #[test]
@@ -160,13 +145,17 @@ mod tests {
         let cache = Arc::new(EntryCache::new_uninit());
 
         hub.start_block(1, tasks_in_blk.clone(), cache.clone());
-        assert_eq!(hub.free_slot_count(), 1);
-        assert_eq!(hub.height0.load(Ordering::SeqCst), 1);
-        assert_eq!(hub.height1.load(Ordering::SeqCst), -1);
-        assert_eq!(hub.tasks_in_blk0.get_ref().as_ref().get_last_task_id(), -1);
-        assert_eq!(hub.tasks_in_blk1.get_ref().as_ref().get_last_task_id(), -1);
+        assert_eq!(hub.free_slot_count(), BLOCK_PIPELINE_DEPTH - 1);
+        // first free slot takes the new block, rest are still idle
+        assert_eq!(hub.slots[0].height.load(Ordering::SeqCst), 1);
+        for slot in &hub.slots[1..] {
+            assert_eq!(slot.height.load(Ordering::SeqCst), -1);
+        }
 
         hub.start_block(2, tasks_in_blk.clone(), cache.clone());
+        hub.start_block(3, tasks_in_blk.clone(), cache.clone());
+        hub.start_block(4, tasks_in_blk.clone(), cache.clone());
+        assert_eq!(hub.free_slot_count(), 0);
 
         hub.end_block(1);
         assert_eq!(hub.free_slot_count(), 1);
@@ -174,6 +163,32 @@ mod tests {
         assert!(std::panic::catch_unwind(move || {
             hub.end_block(1);
         })
+        .is_err());
+    }
+
+    #[test]
+    fn test_fills_beyond_depth_panics() {
+        use std::panic::AssertUnwindSafe;
+        let hub: BlockPairTaskHub<SimpleTask> = BlockPairTaskHub::new();
+        let tasks_in_blk = Arc::new(TasksManager::default());
+        let cache = Arc::new(EntryCache::new_uninit());
+
+        for h in 1..=BLOCK_PIPELINE_DEPTH as i64 {
+            hub.start_block(h, tasks_in_blk.clone(), cache.clone());
+        }
+        assert_eq!(hub.free_slot_count(), 0);
+
+        // One more start_block when all slots are full must panic.
+        // AssertUnwindSafe: the captured Arcs wrap interior-mutability types
+        // (UnsafeCell inside TasksManager / EntryCache); we don't mutate them
+        // across the panic boundary, so asserting unwind-safety is sound.
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(move || {
+            hub.start_block(
+                BLOCK_PIPELINE_DEPTH as i64 + 1,
+                tasks_in_blk,
+                cache,
+            );
+        }))
         .is_err());
     }
 
