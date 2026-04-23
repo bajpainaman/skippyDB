@@ -61,6 +61,32 @@ pub struct MetaDB {
     pending_write: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Errors that `MetaDB::with_dir_checked` can surface. Introduced in Phase 2.1
+/// to stake out the contract for cross-topology reopen detection; Phase 2.2
+/// adds the on-disk detection logic (via a `MetaInfoV2` version envelope that
+/// records the shard count the DB was built against).
+#[derive(Debug, PartialEq, Eq)]
+pub enum MetaDbError {
+    /// The on-disk MetaInfo was built against `got` shards but the caller
+    /// asked for `expected`. Reopening would silently corrupt per-shard
+    /// bookkeeping (serial numbers, entry-file sizes, root hashes, …).
+    ShardCountMismatch { expected: usize, got: usize },
+}
+
+impl std::fmt::Display for MetaDbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetaDbError::ShardCountMismatch { expected, got } => write!(
+                f,
+                "MetaDB shard-count mismatch: expected {}, on-disk claims {}",
+                expected, got
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MetaDbError {}
+
 fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
     let mut f = File::open(filename).expect("no file found");
     let metadata = fs::metadata(filename).expect("unable to read metadata");
@@ -71,6 +97,27 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
 }
 
 impl MetaDB {
+    /// Like [`Self::with_dir`], but validates that the on-disk MetaInfo was
+    /// built against `expected_shard_count`. Phase 2.x production code paths
+    /// that are prepared for a shard-count mismatch should call this instead
+    /// of `with_dir`.
+    ///
+    /// **Phase 2.1 (today):** wraps `with_dir` and always returns `Ok`. The
+    /// failing integration test at `tests/metadb_shard_count_mismatch.rs`
+    /// documents the intended contract.
+    ///
+    /// **Phase 2.2:** adds the `MetaInfoV2` version envelope that records the
+    /// DB's shard count and makes this method reject mismatches with
+    /// `Err(MetaDbError::ShardCountMismatch)`.
+    pub fn with_dir_checked(
+        dir_name: &str,
+        cipher: Option<Aes256Gcm>,
+        expected_shard_count: usize,
+    ) -> Result<Self, MetaDbError> {
+        let _ = expected_shard_count; // suppressed until Phase 2.2 wires detection.
+        Ok(Self::with_dir(dir_name, cipher))
+    }
+
     pub fn with_dir(dir_name: &str, cipher: Option<Aes256Gcm>) -> Self {
         let meta_file_name = format!("{}/info", dir_name);
         let file_name = format!("{}/prune_helper", dir_name);
