@@ -44,6 +44,26 @@ have owners.
   `main-5m.json` / `phaseN-5m.json`. 40M bench unaffected. Every phase uses
   the same flags, so ratios stay honest.
 
+## Phase 1.2 empirical finding (DO NOT reintroduce depth>2 blindly)
+
+- Bumping `BLOCK_PIPELINE_DEPTH` from 2 → 4 regressed at 40M cuda on
+  skippy-dev (5900X + RTX 4080S + ext4 NVMe): **reads -10%**, updates
+  -4.2%, transactions -4.4% vs main. block_population stayed positive
+  but weaker than depth 2 (+4.5% vs +6.9%).
+- Root cause hypothesis: this workload isn't backpressure-bound on
+  free pipeline slots — the flusher is not stalling waiting for the
+  updater to hand off, so extra in-flight slots add no overlap
+  benefit. Meanwhile each extra slot holds a live `Arc<EntryCache>`
+  which spreads hot entries across more caches and hurts read hit
+  rate (`reads -10%` is the clearest signal).
+- Reverted commit: `perf(taskhub): pipeline depth 2 → 4 (Phase 1.2)`
+  on rewrite/phase1 (b674501) via 2861e21. The `Slot`-array refactor
+  is also reverted — re-add it in Phase 3.4 when
+  `BlockRingTaskHub<N>` becomes runtime-configurable and can be tuned
+  per target-validator profile (enterprise PCIe Gen5 NVMe + H100/H200
+  is where >2 might pay off, because the fsync tail shrinks and the
+  cache-pollution penalty per slot scales differently).
+
 ## Test flakes
 
 - `compactor::compactor_tests::test_compact` is flaky under `cargo test`
