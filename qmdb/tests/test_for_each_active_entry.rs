@@ -13,13 +13,13 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use kyumdb::config::Config;
-use kyumdb::def::{IN_BLOCK_IDX_BITS, SHARD_COUNT};
-use kyumdb::seqads::task::{SingleCsTask, TaskBuilder};
-use kyumdb::tasks::TasksManager;
-use kyumdb::test_helper::TempDir;
-use kyumdb::utils::{byte0_to_shard_id, hasher};
-use kyumdb::{AdsCore, AdsWrap, ADS};
+use skippydb::config::Config;
+use skippydb::def::{IN_BLOCK_IDX_BITS, SHARD_COUNT};
+use skippydb::seqads::task::{SingleCsTask, TaskBuilder};
+use skippydb::tasks::TasksManager;
+use skippydb::test_helper::TempDir;
+use skippydb::utils::{byte0_to_shard_id, hasher};
+use skippydb::{AdsCore, AdsWrap, ADS};
 
 fn key_for(i: u32) -> Vec<u8> {
     let mut k = b"acct-".to_vec();

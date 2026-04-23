@@ -1,12 +1,12 @@
 use hpfile::TempDir;
-use kyumdb::config::Config;
-use kyumdb::def::{IN_BLOCK_IDX_BITS, OP_CREATE};
-use kyumdb::entryfile::EntryBz;
-use kyumdb::seqads::{SeqAds, SeqAdsWrap};
-use kyumdb::test_helper::SimpleTask;
-use kyumdb::utils::changeset::ChangeSet;
-use kyumdb::utils::{byte0_to_shard_id, hasher};
-use kyumdb::{AdsCore, ADS};
+use skippydb::config::Config;
+use skippydb::def::{IN_BLOCK_IDX_BITS, OP_CREATE};
+use skippydb::entryfile::EntryBz;
+use skippydb::seqads::{SeqAds, SeqAdsWrap};
+use skippydb::test_helper::SimpleTask;
+use skippydb::utils::changeset::ChangeSet;
+use skippydb::utils::{byte0_to_shard_id, hasher};
+use skippydb::{AdsCore, ADS};
 use std::fs::remove_dir_all;
 
 #[cfg(not(feature = "tee_cipher"))]

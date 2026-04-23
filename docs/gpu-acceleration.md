@@ -1,6 +1,6 @@
 # GPU Acceleration Guide
 
-KyumDB supports optional CUDA GPU-accelerated SHA256 batch hashing for Merkle tree operations. This guide covers setup, usage, kernel internals, benchmarking, and tuning.
+SkippyDB supports optional CUDA GPU-accelerated SHA256 batch hashing for Merkle tree operations. This guide covers setup, usage, kernel internals, benchmarking, and tuning.
 
 ---
 
@@ -19,7 +19,7 @@ KyumDB supports optional CUDA GPU-accelerated SHA256 batch hashing for Merkle tr
   - [SoA Node Hash](#soa-node-hash-sha256_node_hash_soa)
   - [Warp-Cooperative Node Hash](#warp-cooperative-node-hash-sha256_node_hash_warp_coop)
   - [Variable-Length Hash](#variable-length-hash-sha256_variable_hash)
-- [Integration with KyumDB Pipeline](#integration-with-kyumdb-pipeline)
+- [Integration with SkippyDB Pipeline](#integration-with-skippydb-pipeline)
 - [Multi-GPU Support](#multi-gpu-support)
 - [Performance Tuning](#performance-tuning)
 - [CPU Fallback](#cpu-fallback)
@@ -31,7 +31,7 @@ KyumDB supports optional CUDA GPU-accelerated SHA256 batch hashing for Merkle tr
 
 ## Overview
 
-KyumDB's Merkle tree synchronization is dominated by SHA256 hashing. During block processing, the flusher must compute thousands of node hashes (SHA256 of `level || left_32B || right_32B` = 65 bytes each) to update twig roots, active bits trees, and upper tree nodes.
+SkippyDB's Merkle tree synchronization is dominated by SHA256 hashing. During block processing, the flusher must compute thousands of node hashes (SHA256 of `level || left_32B || right_32B` = 65 bytes each) to update twig roots, active bits trees, and upper tree nodes.
 
 GPU acceleration batches these independent hash operations and dispatches them to CUDA cores for parallel execution. On an RTX 3080, this can provide 3-5x throughput improvement over AVX2/SHA-NI CPU hashing at batch sizes >10K.
 
@@ -335,7 +335,7 @@ Handles arbitrary input lengths with proper SHA256 padding. Each thread reads it
 
 ---
 
-## Integration with KyumDB Pipeline
+## Integration with SkippyDB Pipeline
 
 ### Flusher Integration
 
@@ -572,7 +572,7 @@ If built with `--features cuda` but no GPU is available:
 [INFO] CUDA GPU hasher unavailable, falling back to CPU: CUDA device 0 init failed: ...
 ```
 
-This is expected — KyumDB gracefully falls back to CPU hashing.
+This is expected — SkippyDB gracefully falls back to CPU hashing.
 
 ### Performance Tips
 

@@ -1,15 +1,15 @@
 use byteorder::{ByteOrder, LittleEndian};
-use kyumdb::config::Config;
-use kyumdb::def::{
+use skippydb::config::Config;
+use skippydb::def::{
     DEFAULT_ENTRY_SIZE, IN_BLOCK_IDX_BITS, OP_CREATE, OP_DELETE, OP_WRITE, SENTRY_COUNT,
     SHARD_COUNT,
 };
-use kyumdb::entryfile::{
+use skippydb::entryfile::{
     entry::{entry_to_vec, sentry_entry},
     Entry, EntryBz,
 };
-use kyumdb::utils::hasher::hash;
-use kyumdb::utils::{byte0_to_shard_id, OpRecord};
+use skippydb::utils::hasher::hash;
+use skippydb::utils::{byte0_to_shard_id, OpRecord};
 use rocksdb::{Direction, IteratorMode, WriteBatch, WriteBatchWithTransaction, WriteOptions, DB};
 use std::path::Path;
 use std::sync::mpsc::SyncSender;
@@ -518,7 +518,7 @@ mod tests {
 
     use serial_test::serial;
 
-    use kyumdb::test_helper::TempDir;
+    use skippydb::test_helper::TempDir;
 
     use super::*;
     use std::sync::mpsc::sync_channel;

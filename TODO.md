@@ -37,6 +37,13 @@ have owners.
 - `bench/README.md` is a one-line stub. Fill in once bench/results/ has real
   data.
 
+- **Ultraplan drift: `--entry-count 4000000` fails precondition** at
+  `bench/src/bin/speed.rs:74` (`blocks_for_db_population=40 < tps_blocks=50`
+  with release defaults). Minimum that works with default flags is
+  `--entry-count 5000000`. Using 5M for the "4M bench" slot and calling it
+  `main-5m.json` / `phaseN-5m.json`. 40M bench unaffected. Every phase uses
+  the same flags, so ratios stay honest.
+
 ## Known `slow_hashing` wart
 
 - `flusher.rs:261-321` detached-thread variant; Phase 1.1 routes it through

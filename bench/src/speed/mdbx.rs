@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use log::debug;
 use parking_lot::RwLock;
-use kyumdb::{
+use skippydb::{
     def::{OP_CREATE, OP_DELETE, OP_READ, OP_WRITE},
     tasks::Task,
     test_helper::SimpleTask,

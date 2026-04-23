@@ -1,4 +1,4 @@
-//! # KyumDB
+//! # SkippyDB
 //!
 //! A high-performance verifiable key-value store with SHA256 Merkle trees,
 //! designed for blockchain state storage. Supports sharded append-only entry
@@ -32,7 +32,7 @@
 //!
 //! With `--features cuda`, batch Merkle hash operations are dispatched to CUDA
 //! cores. See the [`gpu`] module and the
-//! [GPU Integration Guide](https://github.com/bajpainaman/kyumdb/blob/main/docs/gpu-integration-guide.md).
+//! [GPU Integration Guide](https://github.com/bajpainaman/SkippyDB/blob/main/docs/gpu-integration-guide.md).
 
 extern crate core;
 pub mod compactor;

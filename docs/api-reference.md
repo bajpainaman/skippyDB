@@ -1,6 +1,6 @@
-# KyumDB API Reference
+# SkippyDB API Reference
 
-This document covers the public API surface of KyumDB. For architecture details, see [architecture.md](architecture.md). For GPU-specific APIs, see [gpu-acceleration.md](gpu-acceleration.md).
+This document covers the public API surface of SkippyDB. For architecture details, see [architecture.md](architecture.md). For GPU-specific APIs, see [gpu-acceleration.md](gpu-acceleration.md).
 
 ---
 
@@ -26,7 +26,7 @@ This document covers the public API surface of KyumDB. For architecture details,
 
 **File**: `qmdb/src/lib.rs`
 
-The primary interface for interacting with KyumDB. Implemented by `SharedAdsWrap`.
+The primary interface for interacting with SkippyDB. Implemented by `SharedAdsWrap`.
 
 ```rust
 pub trait ADS: Send + Sync + 'static {
