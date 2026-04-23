@@ -15,8 +15,26 @@ use std::{
     os::unix::fs::FileExt,
 };
 
+/// On-disk version envelope magic. Written at the head of every plaintext
+/// MetaInfo payload (inside the AES-GCM ciphertext when `tee_cipher` is on).
+///
+/// - Phase 2.2 format `b"SKIPV2\x00\x00"`. Anything else is rejected by
+///   `reload_from_file` and `with_dir_checked` so old DBs fail loudly instead
+///   of being silently reinitialized to defaults (the pre-2.2 behavior was
+///   a data-loss hazard).
+///
+/// When we bump the format again (Phase 3+), bump the last two bytes, add the
+/// new magic to the `recognize_magic` dispatch below, and leave the V2 path
+/// green for the duration of the deprecation window.
+pub const META_MAGIC_V2: &[u8; 8] = b"SKIPV2\x00\x00";
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct MetaInfo {
+    /// Number of shards the DB was built against. Recorded so a binary with a
+    /// different compile-time `SHARD_COUNT` refuses to reopen rather than
+    /// silently corrupt per-shard bookkeeping. Stamped by `MetaInfo::new` at
+    /// build time; validated by `MetaDB::with_dir_checked`.
+    pub shard_count: u32,
     pub curr_height: i64,
     pub last_pruned_twig: [(u64, i64); SHARD_COUNT],
     pub next_serial_num: [u64; SHARD_COUNT],
@@ -34,6 +52,7 @@ pub struct MetaInfo {
 impl MetaInfo {
     fn new() -> Self {
         Self {
+            shard_count: SHARD_COUNT as u32,
             curr_height: 0,
             last_pruned_twig: [(0, 0); SHARD_COUNT],
             next_serial_num: [0; SHARD_COUNT],
@@ -71,6 +90,14 @@ pub enum MetaDbError {
     /// asked for `expected`. Reopening would silently corrupt per-shard
     /// bookkeeping (serial numbers, entry-file sizes, root hashes, …).
     ShardCountMismatch { expected: usize, got: usize },
+    /// Found a MetaInfo file whose version envelope we don't recognize.
+    /// Covers both pre-V2 files (no magic) and future formats. Callers
+    /// should surface a "rebuild the DB" message rather than retry.
+    UnsupportedFormat { head: [u8; 8] },
+    /// Bincode couldn't parse the plaintext payload after the V2 magic.
+    /// Usually means the file was truncated or partially written during a
+    /// crash.
+    CorruptPayload(String),
 }
 
 impl std::fmt::Display for MetaDbError {
@@ -81,11 +108,51 @@ impl std::fmt::Display for MetaDbError {
                 "MetaDB shard-count mismatch: expected {}, on-disk claims {}",
                 expected, got
             ),
+            MetaDbError::UnsupportedFormat { head } => write!(
+                f,
+                "MetaDB format not recognized (head={:02x?}); expected V2 magic {:02x?}",
+                head, META_MAGIC_V2
+            ),
+            MetaDbError::CorruptPayload(reason) => write!(
+                f,
+                "MetaDB payload could not be deserialized: {}",
+                reason
+            ),
         }
     }
 }
 
 impl std::error::Error for MetaDbError {}
+
+/// Strip the V2 magic header from a plaintext MetaInfo blob and deserialize
+/// the rest. Returns `UnsupportedFormat` for anything that doesn't start with
+/// `META_MAGIC_V2` (which notably includes pre-2.2 files).
+fn parse_metainfo_v2(plaintext: &[u8]) -> Result<MetaInfo, MetaDbError> {
+    if plaintext.len() < META_MAGIC_V2.len() {
+        let mut head = [0u8; 8];
+        head[..plaintext.len()].copy_from_slice(plaintext);
+        return Err(MetaDbError::UnsupportedFormat { head });
+    }
+    let (magic, rest) = plaintext.split_at(META_MAGIC_V2.len());
+    if magic != META_MAGIC_V2 {
+        let mut head = [0u8; 8];
+        head.copy_from_slice(magic);
+        return Err(MetaDbError::UnsupportedFormat { head });
+    }
+    bincode::deserialize::<MetaInfo>(rest)
+        .map_err(|e| MetaDbError::CorruptPayload(e.to_string()))
+}
+
+/// Prepend `META_MAGIC_V2` to `bincode(info)` to produce the plaintext written
+/// to disk (or fed into AES-GCM when `tee_cipher` is on). Every commit path
+/// must route through this so on-disk files always carry the envelope.
+fn serialize_metainfo_v2(info: &MetaInfo) -> Vec<u8> {
+    let body = bincode::serialize(info).expect("MetaInfo serialization is infallible");
+    let mut out = Vec::with_capacity(META_MAGIC_V2.len() + body.len());
+    out.extend_from_slice(META_MAGIC_V2);
+    out.extend_from_slice(&body);
+    out
+}
 
 fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
     let mut f = File::open(filename).expect("no file found");
@@ -114,8 +181,39 @@ impl MetaDB {
         cipher: Option<Aes256Gcm>,
         expected_shard_count: usize,
     ) -> Result<Self, MetaDbError> {
-        let _ = expected_shard_count; // suppressed until Phase 2.2 wires detection.
-        Ok(Self::with_dir(dir_name, cipher))
+        let meta_file_name = format!("{}/info", dir_name);
+        let file_name = format!("{}/prune_helper", dir_name);
+        if !Path::new(dir_name).exists() {
+            fs::create_dir(dir_name).unwrap();
+        }
+        let history_file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(file_name)
+            .expect("no file found");
+        let mut res = Self {
+            info: MetaInfo::new(),
+            meta_file_name,
+            history_file,
+            extra_data_map: Arc::new(DashMap::new()),
+            cipher,
+            pending_write: None,
+        };
+        // A fresh `info.0` doesn't exist yet — both slots are absent. In that
+        // case `reload_from_file_checked` is a no-op and `shard_count` stays
+        // at whatever the caller's `SHARD_COUNT` was stamped by
+        // `MetaInfo::new`. Validate the compare against that too so e.g.
+        // `with_dir_checked(fresh_dir, expected=99)` still fails fast.
+        res.reload_from_file_checked()?;
+        let got = res.info.shard_count as usize;
+        if got != expected_shard_count {
+            return Err(MetaDbError::ShardCountMismatch {
+                expected: expected_shard_count,
+                got,
+            });
+        }
+        Ok(res)
     }
 
     pub fn with_dir(dir_name: &str, cipher: Option<Aes256Gcm>) -> Self {
@@ -143,36 +241,41 @@ impl MetaDB {
     }
 
     pub fn reload_from_file(&mut self) {
-        let mut name = format!("{}.0", self.meta_file_name);
-        if Path::new(&name).exists() {
-            let mut meta_info_bz = get_file_as_byte_vec(&name);
-            if self.cipher.is_some() {
-                Self::decrypt(&self.cipher, &mut meta_info_bz);
-                let size = meta_info_bz.len();
-                meta_info_bz = meta_info_bz[8..size - TAG_SIZE].to_owned();
-            }
-            match bincode::deserialize::<MetaInfo>(&meta_info_bz[..]) {
-                Ok(info) => self.info = info,
-                Err(_) => warn!("Failed to deserialize {}, ignore it", name),
-            };
+        // Old lossy callers (everything except `with_dir_checked`) get the
+        // loud-panic behavior: V1 or corrupt files panic on reload instead
+        // of silently reinitializing to defaults — the pre-2.2 behavior was
+        // a data-loss hazard. Missing files are still fine (fresh DB).
+        if let Err(e) = self.reload_from_file_checked() {
+            panic!(
+                "MetaDB::reload_from_file: {} — old pre-V2 DBs must be rebuilt, \
+                 see TODO.md 'Phase 2.2 on-disk format bump'",
+                e
+            );
         }
-        name = format!("{}.1", self.meta_file_name);
-        if Path::new(&name).exists() {
-            let mut meta_info_bz = get_file_as_byte_vec(&name);
-            if self.cipher.is_some() {
-                Self::decrypt(&self.cipher, &mut meta_info_bz);
-                let size = meta_info_bz.len();
-                meta_info_bz = meta_info_bz[8..size - TAG_SIZE].to_owned();
+    }
+
+    /// Fallible reload path. Reads `{meta_file_name}.0` and `.1`, strips the
+    /// V2 magic envelope, and keeps the higher-`curr_height` winner. Used by
+    /// `with_dir_checked`; `reload_from_file` is a panicking wrapper for the
+    /// legacy `with_dir` callers.
+    pub fn reload_from_file_checked(&mut self) -> Result<(), MetaDbError> {
+        for slot in [0, 1] {
+            let name = format!("{}.{}", self.meta_file_name, slot);
+            if !Path::new(&name).exists() {
+                continue;
             }
-            match bincode::deserialize::<MetaInfo>(&meta_info_bz[..]) {
-                Ok(info) => {
-                    if info.curr_height > self.info.curr_height {
-                        self.info = info; //pick the latest one
-                    }
-                }
-                Err(_) => warn!("Failed to deserialize {}, ignore it", name),
-            };
+            let mut bz = get_file_as_byte_vec(&name);
+            if self.cipher.is_some() {
+                Self::decrypt(&self.cipher, &mut bz);
+                let size = bz.len();
+                bz = bz[8..size - TAG_SIZE].to_owned();
+            }
+            let candidate = parse_metainfo_v2(&bz)?;
+            if slot == 0 || candidate.curr_height > self.info.curr_height {
+                self.info = candidate;
+            }
         }
+        Ok(())
     }
 
     fn decrypt(cipher: &Option<Aes256Gcm>, bz: &mut [u8]) {
@@ -206,7 +309,7 @@ impl MetaDB {
         let kv = self.extra_data_map.remove(&self.info.curr_height).unwrap();
         self.info.extra_data = kv.1;
         let name = format!("{}.{}", self.meta_file_name, self.info.curr_height % 2);
-        let mut bz = bincode::serialize(&self.info).unwrap();
+        let mut bz = serialize_metainfo_v2(&self.info);
         if self.cipher.is_some() {
             let cipher = self.cipher.as_ref().unwrap();
             let mut nonce_arr = [0u8; NONCE_SIZE];
@@ -284,7 +387,7 @@ impl MetaDB {
             self.meta_file_name,
             self.info.curr_height % 2
         );
-        let meta_bytes = bincode::serialize(&self.info).unwrap();
+        let meta_bytes = serialize_metainfo_v2(&self.info);
         let write_data = if self.cipher.is_some() {
             let cipher = self.cipher.as_ref().unwrap();
             let mut nonce_arr = [0u8; NONCE_SIZE];

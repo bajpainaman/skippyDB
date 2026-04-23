@@ -44,6 +44,25 @@ have owners.
   `main-5m.json` / `phaseN-5m.json`. 40M bench unaffected. Every phase uses
   the same flags, so ratios stay honest.
 
+## Phase 2.2 on-disk format bump (BREAKING)
+
+- `MetaInfo` plaintext is now prefixed with the 8-byte magic
+  `META_MAGIC_V2 = b"SKIPV2\x00\x00"`. Written at the head of every
+  `info.0` / `info.1` file (inside the AES-GCM payload when
+  `tee_cipher` is on).
+- `MetaInfo` gained a `shard_count: u32` field (stamped from
+  `SHARD_COUNT` at build time) so Phase 2.3's runtime Topology can
+  refuse to reopen a DB built against a different compile-time
+  shard count.
+- Pre-V2 DBs (anything from `rewrite/phase1` and earlier) are **not
+  migrated** — `MetaDB::reload_from_file` panics loudly with a
+  pointer back to this TODO entry. `MetaDB::with_dir_checked` returns
+  `MetaDbError::UnsupportedFormat` so callers that care can surface
+  a clean error instead.
+- When bumping the format again, bump the last two bytes of
+  `META_MAGIC_V2`, add a dispatch in `parse_metainfo_v2`, and leave
+  the V2 path green for a deprecation window.
+
 ## Phase 1.2 empirical finding (DO NOT reintroduce depth>2 blindly)
 
 - Bumping `BLOCK_PIPELINE_DEPTH` from 2 → 4 regressed at 40M cuda on

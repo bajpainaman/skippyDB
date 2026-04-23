@@ -43,6 +43,10 @@ fn metadb_with_dir_checked_detects_shard_count_mismatch() {
             assert_eq!(e, expected, "error.expected must round-trip the caller's claim");
             assert_eq!(g, got, "error.got must reflect the on-disk shard count");
         }
+        Err(other) => panic!(
+            "expected ShardCountMismatch, got different MetaDbError variant: {:?}",
+            other
+        ),
         Ok(_) => panic!(
             "BUG: MetaDB::with_dir_checked silently accepted a shard-count mismatch \
              (expected={}, on-disk={}). Phase 2.2 must detect this before any downstream \
