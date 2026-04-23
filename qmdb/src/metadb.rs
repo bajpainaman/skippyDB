@@ -34,36 +34,44 @@ pub struct MetaInfo {
     /// different compile-time `SHARD_COUNT` refuses to reopen rather than
     /// silently corrupt per-shard bookkeeping. Stamped by `MetaInfo::new` at
     /// build time; validated by `MetaDB::with_dir_checked`.
+    ///
+    /// `shard_count` also sizes the `Box<[T]>` per-shard fields below — they
+    /// are length-prefixed by bincode, so the invariant
+    /// `self.shard_count as usize == self.<field>.len()` holds across every
+    /// serialize/deserialize round-trip.
     pub shard_count: u32,
     pub curr_height: i64,
-    pub last_pruned_twig: [(u64, i64); SHARD_COUNT],
-    pub next_serial_num: [u64; SHARD_COUNT],
-    pub oldest_active_sn: [u64; SHARD_COUNT],
-    pub oldest_active_file_pos: [i64; SHARD_COUNT],
-    pub root_hash: [[u8; 32]; SHARD_COUNT],
+    pub last_pruned_twig: Box<[(u64, i64)]>,
+    pub next_serial_num: Box<[u64]>,
+    pub oldest_active_sn: Box<[u64]>,
+    pub oldest_active_file_pos: Box<[i64]>,
+    pub root_hash: Box<[[u8; 32]]>,
     pub root_hash_by_height: Vec<[u8; 32]>,
-    pub edge_nodes: [Vec<u8>; SHARD_COUNT],
-    pub twig_file_sizes: [i64; SHARD_COUNT],
-    pub entry_file_sizes: [i64; SHARD_COUNT],
-    pub first_twig_at_height: [(u64, i64); SHARD_COUNT],
+    pub edge_nodes: Box<[Vec<u8>]>,
+    pub twig_file_sizes: Box<[i64]>,
+    pub entry_file_sizes: Box<[i64]>,
+    pub first_twig_at_height: Box<[(u64, i64)]>,
     pub extra_data: String,
 }
 
 impl MetaInfo {
-    fn new() -> Self {
+    /// Build a fresh `MetaInfo` sized for `shard_count` shards. Every per-
+    /// shard boxed slice is allocated with the right length so downstream
+    /// setters can index `[shard_id]` without bounds juggling.
+    fn new(shard_count: usize) -> Self {
         Self {
-            shard_count: SHARD_COUNT as u32,
+            shard_count: shard_count as u32,
             curr_height: 0,
-            last_pruned_twig: [(0, 0); SHARD_COUNT],
-            next_serial_num: [0; SHARD_COUNT],
-            oldest_active_sn: [0; SHARD_COUNT],
-            oldest_active_file_pos: [0; SHARD_COUNT],
-            root_hash: [[0; 32]; SHARD_COUNT],
+            last_pruned_twig: vec![(0u64, 0i64); shard_count].into_boxed_slice(),
+            next_serial_num: vec![0u64; shard_count].into_boxed_slice(),
+            oldest_active_sn: vec![0u64; shard_count].into_boxed_slice(),
+            oldest_active_file_pos: vec![0i64; shard_count].into_boxed_slice(),
+            root_hash: vec![[0u8; 32]; shard_count].into_boxed_slice(),
             root_hash_by_height: vec![],
-            edge_nodes: Default::default(),
-            twig_file_sizes: [0; SHARD_COUNT],
-            entry_file_sizes: [0; SHARD_COUNT],
-            first_twig_at_height: [(0, 0); SHARD_COUNT],
+            edge_nodes: vec![Vec::<u8>::new(); shard_count].into_boxed_slice(),
+            twig_file_sizes: vec![0i64; shard_count].into_boxed_slice(),
+            entry_file_sizes: vec![0i64; shard_count].into_boxed_slice(),
+            first_twig_at_height: vec![(0u64, 0i64); shard_count].into_boxed_slice(),
             extra_data: "".to_owned(),
         }
     }
@@ -193,7 +201,7 @@ impl MetaDB {
             .open(file_name)
             .expect("no file found");
         let mut res = Self {
-            info: MetaInfo::new(),
+            info: MetaInfo::new(SHARD_COUNT),
             meta_file_name,
             history_file,
             extra_data_map: Arc::new(DashMap::new()),
@@ -229,7 +237,7 @@ impl MetaDB {
             .open(file_name)
             .expect("no file found");
         let mut res = Self {
-            info: MetaInfo::new(),
+            info: MetaInfo::new(SHARD_COUNT),
             meta_file_name,
             history_file,
             extra_data_map: Arc::new(DashMap::new()),
