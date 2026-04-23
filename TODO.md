@@ -44,6 +44,16 @@ have owners.
   `main-5m.json` / `phaseN-5m.json`. 40M bench unaffected. Every phase uses
   the same flags, so ratios stay honest.
 
+## Test flakes
+
+- `compactor::compactor_tests::test_compact` is flaky under `cargo test`
+  parallelism. Passes 3/3 in isolation on both rewrite/moonshot (pre Phase
+  1.1) and rewrite/phase1 (post Phase 1.1). Failure mode: hpfile panics at
+  `cannot read data just fetched in test_compactor/entries.test fileID 0`,
+  cascading through ringchannel. Pre-existing test-dir collision, not a
+  Phase 1.1 regression. Fix: give the compactor test a unique TempDir
+  suffix or mark it `#[serial]` like the metadb tests.
+
 ## Known `slow_hashing` wart
 
 - `flusher.rs:261-321` detached-thread variant; Phase 1.1 routes it through
