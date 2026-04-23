@@ -93,7 +93,7 @@ use crate::dioprefetcher::{JobManager, Prefetcher};
 #[cfg(not(all(target_os = "linux", feature = "directio")))]
 use crate::uniprefetcher::{JobManager, Prefetcher};
 
-use crate::tasks::{BlockPairTaskHub, Task, TaskHub, TasksManager, BLOCK_PIPELINE_DEPTH};
+use crate::tasks::{BlockPairTaskHub, Task, TaskHub, TasksManager};
 use crate::updater::Updater;
 use crate::utils::hasher;
 use crate::utils::ringchannel;
@@ -831,8 +831,8 @@ impl<T: Task + 'static> AdsWrap<T> {
     }
 
     pub fn flush(&mut self) -> Vec<Arc<MetaInfo>> {
-        let mut v = Vec::with_capacity(BLOCK_PIPELINE_DEPTH);
-        while self.task_hub.free_slot_count() < BLOCK_PIPELINE_DEPTH {
+        let mut v = Vec::with_capacity(2);
+        while self.task_hub.free_slot_count() < 2 {
             let meta_info = self.end_block_chan.recv().unwrap();
             self.task_hub.end_block(meta_info.curr_height);
             v.push(meta_info);
@@ -1073,11 +1073,7 @@ mod tests {
 
         let mut ads = AdsWrap::new(&config);
 
-        // Exercise the pipeline: fill all slots, then start one more to force
-        // eviction of the oldest in-flight block (height=1), then flush the
-        // remaining `BLOCK_PIPELINE_DEPTH` blocks.
-        let depth = BLOCK_PIPELINE_DEPTH as i64;
-        for h in 1..=(depth + 1) {
+        for h in 1..=3 {
             let task_id = h << IN_BLOCK_IDX_BITS;
             let r = ads.start_block(
                 h,
@@ -1091,11 +1087,9 @@ mod tests {
                 )),
             );
             assert!(r.0);
-            if h <= depth {
-                assert!(r.1.is_none(), "slot was free, no eviction expected");
+            if h <= 2 {
+                assert!(r.1.is_none());
             } else {
-                // Pipeline was full; start_block must have waited for and
-                // surfaced the oldest block (height=1).
                 assert_eq!(r.1.as_ref().unwrap().curr_height, 1);
                 assert_eq!(r.1.as_ref().unwrap().extra_data, format!("height:{}", 1));
             }
@@ -1103,13 +1097,9 @@ mod tests {
             shared_ads.insert_extra_data(h, format!("height:{}", h));
             shared_ads.add_task(task_id);
         }
-        // flush() drains everything still in flight — that's heights
-        // 2..=depth+1 in order (block 1 was already drained during the
-        // overflow start_block above).
         let r = ads.flush();
-        assert_eq!(r.len(), depth as usize);
-        for (i, mi) in r.iter().enumerate() {
-            assert_eq!(mi.curr_height, i as i64 + 2);
-        }
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].curr_height, 2);
+        assert_eq!(r[1].curr_height, 3);
     }
 }
