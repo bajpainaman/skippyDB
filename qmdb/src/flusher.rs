@@ -13,10 +13,53 @@ use crate::gpu::GpuHasher;
 #[cfg(feature = "cuda")]
 use crate::gpu::GpuNodeStore;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Barrier, Condvar, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex, OnceLock};
 use std::thread;
+
+/// Phase 0 instrumentation (off by default, env-gated).
+///
+/// When `SKIPPY_TRACE=1` is set at process start, every flusher phase wraps
+/// its body in an `Instant` timer and emits `TRACE shard=S height=H phase=P
+/// us=US` to stderr on completion. A post-run awk pass collapses those lines
+/// into the per-phase-per-block CSV the advisor asked for.
+///
+/// The env read happens exactly once via `OnceLock`; every subsequent
+/// `trace_phase` call loads a `AtomicBool::Relaxed`, which is a single
+/// ordinary load on x86_64 — cheap enough to leave in the hot path. When
+/// tracing is off the closure runs with no extra allocation or syscall.
+static TRACE_ENABLED: OnceLock<AtomicBool> = OnceLock::new();
+
+#[inline]
+fn trace_enabled() -> bool {
+    TRACE_ENABLED
+        .get_or_init(|| AtomicBool::new(std::env::var_os("SKIPPY_TRACE").is_some()))
+        .load(Ordering::Relaxed)
+}
+
+#[inline]
+fn trace_phase<R>(
+    shard_id: usize,
+    height: i64,
+    name: &'static str,
+    f: impl FnOnce() -> R,
+) -> R {
+    if trace_enabled() {
+        let start = std::time::Instant::now();
+        let r = f();
+        eprintln!(
+            "TRACE shard={} height={} phase={} us={}",
+            shard_id,
+            height,
+            name,
+            start.elapsed().as_micros()
+        );
+        r
+    } else {
+        f()
+    }
+}
 
 type RocksMetaDB = MetaDB;
 
@@ -573,23 +616,28 @@ impl FlusherShard {
         bar_set: Arc<BarrierSet>,
         end_block_chan: SyncSender<Arc<MetaInfo>>,
     ) {
+        let shard_id_self = self.shard_id;
+
         // 1. Read entries from buffer and append to tree (same as CPU/GPU path)
-        let buf_read = self.buf_read.as_mut().unwrap();
-        loop {
-            let mut file_pos: i64 = 0;
-            let (is_end_of_block, expected_file_pos) = buf_read.read_next_entry(|entry_bz| {
-                file_pos = self.tree.append_entry(&entry_bz).unwrap();
-                for (_, dsn) in entry_bz.dsn_iter() {
-                    self.tree.deactive_entry(dsn);
+        trace_phase(shard_id_self, curr_height, "entry_append", || {
+            let buf_read = self.buf_read.as_mut().unwrap();
+            loop {
+                let mut file_pos: i64 = 0;
+                let (is_end_of_block, expected_file_pos) = buf_read.read_next_entry(|entry_bz| {
+                    file_pos = self.tree.append_entry(&entry_bz).unwrap();
+                    for (_, dsn) in entry_bz.dsn_iter() {
+                        self.tree.deactive_entry(dsn);
+                    }
+                });
+                if !is_end_of_block && file_pos != expected_file_pos {
+                    panic!("File_pos mismatch!");
                 }
-            });
-            if !is_end_of_block && file_pos != expected_file_pos {
-                panic!("File_pos mismatch!");
+                if is_end_of_block {
+                    break;
+                }
             }
-            if is_end_of_block {
-                break;
-            }
-        }
+        });
+        let buf_read = self.buf_read.as_mut().unwrap();
         let (compact_done_pos, compact_done_sn, sn_end) = buf_read.read_extra_info();
 
         // 2. Merkle tree flush (same GPU path for twig-level ops)
@@ -622,81 +670,117 @@ impl FlusherShard {
             let del_start = self.last_compact_done_sn / (LEAF_COUNT_IN_TWIG as u64);
             let del_end = compact_done_sn / (LEAF_COUNT_IN_TWIG as u64);
 
-            // GPU flush_files: uses GPU for youngest twig sync + active bits phase1
-            let tmp_list = self.tree.flush_files_gpu(gpu, del_start, del_end);
+            // GPU flush_files: uses GPU for youngest twig sync + active bits phase1.
+            // This is also where HPFile::flush fires — both the entry file and
+            // twig file get their `sync_all` inside this phase. If fsync is the
+            // bar, it'll show up here.
+            let tmp_list = trace_phase(
+                shard_id_self,
+                curr_height,
+                "flush_files_gpu",
+                || self.tree.flush_files_gpu(gpu, del_start, del_end),
+            );
 
             let (entry_file_size, twig_file_size) = self.tree.get_file_sizes();
             let last_compact_done_sn = self.last_compact_done_sn;
             self.last_compact_done_sn = compact_done_sn;
-            bar_set.flush_bar.wait();
+            // `flush_bar.wait()` makes the fastest shard stall for the slowest.
+            // Traced so we can see how much of the block time is wasted on
+            // tail-latency imbalance between shards.
+            trace_phase(shard_id_self, curr_height, "flush_bar_wait", || {
+                bar_set.flush_bar.wait();
+            });
 
             let youngest_twig_id = self.tree.youngest_twig_id;
             let shard_id = self.shard_id;
             let upper_tree = &mut self.tree.upper_tree;
 
-            // GPU evict_twigs: uses GPU for active bits phase2
-            let n_list = upper_tree.evict_twigs_gpu(
-                gpu,
-                tmp_list,
-                last_compact_done_sn >> TWIG_SHIFT,
-                compact_done_sn >> TWIG_SHIFT,
+            let n_list = trace_phase(
+                shard_id_self,
+                curr_height,
+                "evict_twigs_gpu",
+                || {
+                    upper_tree.evict_twigs_gpu(
+                        gpu,
+                        tmp_list,
+                        last_compact_done_sn >> TWIG_SHIFT,
+                        compact_done_sn >> TWIG_SHIFT,
+                    )
+                },
             );
 
-            // GPU-RESIDENT upper tree sync (the key optimization)
-            // If we have a GpuNodeStore, run the entire upper tree computation on GPU.
-            // Otherwise, fall back to the per-level GPU path.
-            let (_new_n_list, root_hash) = if let Some(store) = gpu_store {
-                // Clear the store for this block (nodes change each block)
-                let _ = store.clear();
-                upper_tree.sync_upper_nodes_gpu_resident(
-                    gpu, store, n_list, youngest_twig_id,
-                )
-            } else {
-                upper_tree.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
-            };
+            let (_new_n_list, root_hash) = trace_phase(
+                shard_id_self,
+                curr_height,
+                "sync_upper_nodes",
+                || {
+                    if let Some(store) = gpu_store {
+                        let _ = store.clear();
+                        upper_tree.sync_upper_nodes_gpu_resident(
+                            gpu, store, n_list, youngest_twig_id,
+                        )
+                    } else {
+                        upper_tree.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
+                    }
+                },
+            );
 
-            let mut edge_nodes_bytes = Vec::<u8>::with_capacity(0);
-            if prune_to_height > 0
-                && prune_to_height % PRUNE_EVERY_NBLOCKS == 0
-                && start_twig_id < end_twig_id
-            {
-                edge_nodes_bytes =
-                    upper_tree.prune_nodes(start_twig_id, end_twig_id, youngest_twig_id);
-            }
+            let edge_nodes_bytes = trace_phase(
+                shard_id_self,
+                curr_height,
+                "prune_nodes",
+                || {
+                    if prune_to_height > 0
+                        && prune_to_height % PRUNE_EVERY_NBLOCKS == 0
+                        && start_twig_id < end_twig_id
+                    {
+                        upper_tree.prune_nodes(start_twig_id, end_twig_id, youngest_twig_id)
+                    } else {
+                        Vec::<u8>::with_capacity(0)
+                    }
+                },
+            );
 
-            self.handle_proof_req();
+            trace_phase(shard_id_self, curr_height, "handle_proof_req", || {
+                self.handle_proof_req();
+            });
 
             // Countdown-gated commit; see BarrierSet::is_last_to_commit.
-            let mut guard = meta.write_arc();
-            if !edge_nodes_bytes.is_empty() {
-                guard.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
-                guard.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
-            }
-            guard.set_root_hash(shard_id, root_hash);
-            guard.set_oldest_active_sn(shard_id, compact_done_sn);
-            guard.set_oldest_active_file_pos(shard_id, compact_done_pos);
-            guard.set_next_serial_num(shard_id, sn_end);
-            if curr_height % PRUNE_EVERY_NBLOCKS == 0 {
-                guard.set_first_twig_at_height(
-                    shard_id,
-                    curr_height,
-                    compact_done_sn / (LEAF_COUNT_IN_TWIG as u64),
-                    compact_done_pos,
-                )
-            }
-            guard.set_entry_file_size(shard_id, entry_file_size);
-            guard.set_twig_file_size(shard_id, twig_file_size);
-
-            if bar_set.is_last_to_commit() {
-                guard.set_curr_height(curr_height);
-                let meta_info = guard.commit_async();
-                drop(guard);
-                if end_block_chan.send(meta_info).is_err() {
-                    println!("end block sender exit!");
+            // Covers both the RwLock acquire contention and the actual
+            // `commit_async` spawn (which waits for the previous block's
+            // metadb write thread to join before returning).
+            trace_phase(shard_id_self, curr_height, "metadb_commit", || {
+                let mut guard = meta.write_arc();
+                if !edge_nodes_bytes.is_empty() {
+                    guard.set_edge_nodes(shard_id, &edge_nodes_bytes[..]);
+                    guard.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
                 }
-            } else {
-                drop(guard);
-            }
+                guard.set_root_hash(shard_id, root_hash);
+                guard.set_oldest_active_sn(shard_id, compact_done_sn);
+                guard.set_oldest_active_file_pos(shard_id, compact_done_pos);
+                guard.set_next_serial_num(shard_id, sn_end);
+                if curr_height % PRUNE_EVERY_NBLOCKS == 0 {
+                    guard.set_first_twig_at_height(
+                        shard_id,
+                        curr_height,
+                        compact_done_sn / (LEAF_COUNT_IN_TWIG as u64),
+                        compact_done_pos,
+                    )
+                }
+                guard.set_entry_file_size(shard_id, entry_file_size);
+                guard.set_twig_file_size(shard_id, twig_file_size);
+
+                if bar_set.is_last_to_commit() {
+                    guard.set_curr_height(curr_height);
+                    let meta_info = guard.commit_async();
+                    drop(guard);
+                    if end_block_chan.send(meta_info).is_err() {
+                        println!("end block sender exit!");
+                    }
+                } else {
+                    drop(guard);
+                }
+            });
         }
     }
 }
