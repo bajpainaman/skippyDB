@@ -44,6 +44,30 @@ have owners.
   `main-5m.json` / `phaseN-5m.json`. 40M bench unaffected. Every phase uses
   the same flags, so ratios stay honest.
 
+## Phase 3.1 fdatasync probe — FAILED, experimental branch retained
+
+- Tried `sync_all` → `sync_data` at `hpfile/src/lib.rs:314` on a
+  throwaway `rewrite/phase3-fdatasync` branch (commit 7c0b9f3).
+- 5M cuda smoke: ran clean, `success: true`, numbers in range
+  (block_pop 10.9/s, updates 1.31M/s — within noise of main-5m's
+  10–12/s spread).
+- 40M cuda: **crashed mid-run.** Panic sites: `gpu_hasher.rs:977`
+  (GPU sync), `gpu_hasher.rs:967` (another GPU op), and
+  `flusher.rs:144` (entry append path). Failure cascades through a
+  scoped thread.
+- Hypothesis: compactor (trips at `compact_thres=20M`, so 40M exercises
+  it) reads old entries from the entry file immediately after a flush.
+  `fdatasync` skips some metadata updates that matter for O_DIRECT
+  read-after-write across the segmented HPFile; the compactor's
+  re-append then feeds bad bytes into GPU hashing and the panic chain
+  lights up. 5M never triggers compaction so the bug stays invisible.
+- Correct fix needs either (a) targeted `fdatasync` where safe + keep
+  `fsync` on segment rotation / reads-after-write, or (b) Phase 0
+  instrumentation to see which calls the compactor actually makes
+  after flush. Not attempted this session — reverted to `sync_all` on
+  rewrite/moonshot. The experimental branch stays around for the
+  crash log.
+
 ## Phase 2.2 on-disk format bump (BREAKING)
 
 - `MetaInfo` plaintext is now prefixed with the 8-byte magic
