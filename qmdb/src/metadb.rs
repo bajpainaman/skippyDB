@@ -225,6 +225,23 @@ impl MetaDB {
     }
 
     pub fn with_dir(dir_name: &str, cipher: Option<Aes256Gcm>) -> Self {
+        Self::with_dir_and_shard_count(dir_name, cipher, SHARD_COUNT)
+    }
+
+    /// Build a `MetaDB` sized for a specific runtime shard count. Matches
+    /// `with_dir` when `shard_count == SHARD_COUNT`.
+    ///
+    /// Use this from Phase 2.3+ callers that carry a `Topology`; `with_dir`
+    /// is retained for backward compatibility and pins to the compile-time
+    /// constant. On reload, the on-disk `shard_count` wins over the caller's
+    /// claim (so a 32-shard DB reopened via `with_dir_and_shard_count(.., 64)`
+    /// still loads at 32 — use `with_dir_checked` when you need the typed
+    /// mismatch error instead).
+    pub fn with_dir_and_shard_count(
+        dir_name: &str,
+        cipher: Option<Aes256Gcm>,
+        shard_count: usize,
+    ) -> Self {
         let meta_file_name = format!("{}/info", dir_name);
         let file_name = format!("{}/prune_helper", dir_name);
         if !Path::new(dir_name).exists() {
@@ -237,7 +254,7 @@ impl MetaDB {
             .open(file_name)
             .expect("no file found");
         let mut res = Self {
-            info: MetaInfo::new(SHARD_COUNT),
+            info: MetaInfo::new(shard_count),
             meta_file_name,
             history_file,
             extra_data_map: Arc::new(DashMap::new()),
