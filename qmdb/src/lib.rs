@@ -168,6 +168,7 @@ impl AdsCore {
             config.file_segment_size,
             config.with_twig_file,
             &config.aes_keys,
+            config.topology.shard_count,
         )
     }
 
@@ -178,6 +179,7 @@ impl AdsCore {
         file_segment_size: usize,
         with_twig_file: bool,
         aes_keys: &Option<[u8; 96]>,
+        shard_count: usize,
     ) -> (Self, Receiver<Arc<MetaInfo>>, Flusher) {
         let (ciphers, idx_cipher, meta_db_cipher) = get_ciphers(aes_keys);
         let (data_dir, meta_dir, _indexer_dir) = Self::get_sub_dirs(dir);
@@ -185,7 +187,19 @@ impl AdsCore {
         let dir = (dir.to_owned() + "/idx").to_owned();
         let indexer = Arc::new(Indexer::with_dir_and_cipher(dir, idx_cipher));
         let (eb_sender, eb_receiver) = sync_channel(2);
-        let meta = MetaDB::with_dir(&meta_dir, meta_db_cipher);
+        // Phase 2.3e: MetaDB now sized from `config.topology.shard_count`.
+        // Tree / Flusher / indexer still allocate per `SHARD_COUNT` — lifting
+        // those is the next 2.3e sub-commit. If `shard_count != SHARD_COUNT`,
+        // MetaDB will report a different shape than the rest of the pipeline,
+        // so assert parity here until the whole stack is topology-aware.
+        assert!(
+            shard_count == SHARD_COUNT,
+            "AdsCore only supports shard_count == SHARD_COUNT ({}) today; \
+             got {}. Phase 2.3e will thread topology through Tree/Flusher/\
+             indexer so arbitrary runtime shard counts work end-to-end.",
+            SHARD_COUNT, shard_count
+        );
+        let meta = MetaDB::with_dir_and_shard_count(&meta_dir, meta_db_cipher, shard_count);
         let curr_height = meta.get_curr_height();
         let meta = Arc::new(RwLock::new(meta));
 
@@ -761,6 +775,7 @@ impl<T: Task + 'static> AdsWrap<T> {
             &config.aes_keys,
             config.task_chan_size,
             config.prefetcher_thread_count,
+            config.topology.shard_count,
             #[cfg(feature = "directio")]
             config.uring_count,
             #[cfg(feature = "directio")]
@@ -781,6 +796,7 @@ impl<T: Task + 'static> AdsWrap<T> {
         aes_keys: &Option<[u8; 96]>,
         task_chan_size: usize,
         prefetcher_thread_count: usize,
+        shard_count: usize,
         #[cfg(feature = "directio")] uring_count: usize,
         #[cfg(feature = "directio")] uring_size: u32,
         #[cfg(feature = "directio")] sub_id_chan_size: usize,
@@ -793,6 +809,7 @@ impl<T: Task + 'static> AdsWrap<T> {
             file_segment_size,
             with_twig_file,
             aes_keys,
+            shard_count,
         );
         ads.start_threads(
             flusher,
