@@ -40,18 +40,19 @@ impl Topology {
         }
     }
 
-    /// Construct a Topology with explicit knobs. Phase 2.3a asserts
-    /// `shard_count == SHARD_COUNT` — callers that want a different
-    /// shard count must wait for Phase 2.3b. `workers_per_shard >= 1`.
+    /// Construct a Topology with explicit knobs.
+    ///
+    /// Phase 2.3b-v lifted the old `shard_count == SHARD_COUNT` assertion.
+    /// Callers can now pass `shard_count ∈ {16, 32, 64, …}` and the per-
+    /// shard `Box<[T]>` slices will size accordingly. `byte_range_to_shard_id`
+    /// maps keys into the runtime range.
+    ///
+    /// Guardrails that remain:
+    /// - `shard_count >= 1`.
+    /// - `workers_per_shard >= 1` (Phase 2.4 will enforce an upper bound
+    ///   tied to CPU count).
     pub fn new(shard_count: usize, workers_per_shard: usize) -> Self {
-        assert!(
-            shard_count == SHARD_COUNT,
-            "Phase 2.3a pins runtime shard_count ({}) to compile-time \
-             SHARD_COUNT ({}); Phase 2.3b lifts this once fixed arrays are \
-             swapped to Box<[T]>.",
-            shard_count,
-            SHARD_COUNT,
-        );
+        assert!(shard_count >= 1, "shard_count must be >= 1");
         assert!(
             workers_per_shard >= 1,
             "workers_per_shard must be >= 1 (got {})",
@@ -82,10 +83,19 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_mismatched_shard_count() {
-        let bad = SHARD_COUNT + 1;
-        let err = std::panic::catch_unwind(|| Topology::new(bad, 1));
-        assert!(err.is_err(), "expected panic for shard_count={}", bad);
+    fn new_accepts_runtime_shard_counts() {
+        // Phase 2.3b-v: the old `shard_count == SHARD_COUNT` assertion was
+        // lifted. Whatever shape the caller asks for, they get.
+        for n in [1usize, SHARD_COUNT, 32, 64, 128, 65536] {
+            let t = Topology::new(n, 1);
+            assert_eq!(t.shard_count, n);
+        }
+    }
+
+    #[test]
+    fn new_rejects_zero_shard_count() {
+        let err = std::panic::catch_unwind(|| Topology::new(0, 1));
+        assert!(err.is_err(), "expected panic for shard_count=0");
     }
 
     #[test]

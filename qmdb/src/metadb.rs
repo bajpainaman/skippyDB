@@ -336,8 +336,9 @@ impl MetaDB {
             fs::write(&name, bz).unwrap();
         }
         if self.info.curr_height % PRUNE_EVERY_NBLOCKS == 0 && self.info.curr_height > 0 {
-            let mut data = [0u8; SHARD_COUNT * 16];
-            for shard_id in 0..SHARD_COUNT {
+            let shard_count = self.info.shard_count as usize;
+            let mut data = vec![0u8; shard_count * 16];
+            for shard_id in 0..shard_count {
                 let start = shard_id * 16;
                 let (twig_id, entry_file_size) = self.info.first_twig_at_height[shard_id];
                 LittleEndian::write_u64(&mut data[start..start + 8], twig_id);
@@ -345,7 +346,7 @@ impl MetaDB {
                 if self.cipher.is_some() {
                     let cipher = self.cipher.as_ref().unwrap();
                     let n = self.info.curr_height / PRUNE_EVERY_NBLOCKS;
-                    let pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * (16 + TAG_SIZE);
+                    let pos = (((n as usize - 1) * shard_count) + shard_id) * (16 + TAG_SIZE);
                     let mut nonce_arr = [0u8; NONCE_SIZE];
                     LittleEndian::write_u64(&mut nonce_arr[..8], pos as u64);
                     match cipher.encrypt_in_place_detached(
@@ -419,9 +420,10 @@ impl MetaDB {
         let history_data = if self.info.curr_height % PRUNE_EVERY_NBLOCKS == 0
             && self.info.curr_height > 0
         {
-            let mut data = [0u8; SHARD_COUNT * 16];
+            let shard_count = self.info.shard_count as usize;
+            let mut data = vec![0u8; shard_count * 16];
             let mut history_segments: Vec<Vec<u8>> = Vec::new();
-            for shard_id in 0..SHARD_COUNT {
+            for shard_id in 0..shard_count {
                 let start = shard_id * 16;
                 let (twig_id, entry_file_size) =
                     self.info.first_twig_at_height[shard_id];
@@ -436,7 +438,7 @@ impl MetaDB {
                 if self.cipher.is_some() {
                     let cipher = self.cipher.as_ref().unwrap();
                     let n = self.info.curr_height / PRUNE_EVERY_NBLOCKS;
-                    let pos = (((n as usize - 1) * SHARD_COUNT) + shard_id)
+                    let pos = (((n as usize - 1) * shard_count) + shard_id)
                         * (16 + TAG_SIZE);
                     let mut nonce_arr = [0u8; NONCE_SIZE];
                     LittleEndian::write_u64(&mut nonce_arr[..8], pos as u64);
@@ -535,10 +537,11 @@ impl MetaDB {
     }
 
     pub fn get_first_twig_at_height(&self, shard_id: usize, height: i64) -> (u64, i64) {
+        let shard_count = self.info.shard_count as usize;
         let n = height / PRUNE_EVERY_NBLOCKS;
-        let mut pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * 16;
+        let mut pos = (((n as usize - 1) * shard_count) + shard_id) * 16;
         if self.cipher.is_some() {
-            pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * (16 + TAG_SIZE);
+            pos = (((n as usize - 1) * shard_count) + shard_id) * (16 + TAG_SIZE);
         }
         let mut buf = [0u8; 32];
         if self.cipher.is_some() {
@@ -645,7 +648,8 @@ impl MetaDB {
     pub fn init(&mut self) {
         let curr_height = 0;
         self.info.curr_height = curr_height;
-        for i in 0..SHARD_COUNT {
+        let shard_count = self.info.shard_count as usize;
+        for i in 0..shard_count {
             self.info.last_pruned_twig[i] = (0, 0);
             self.info.next_serial_num[i] = 0;
             self.info.oldest_active_sn[i] = 0;
