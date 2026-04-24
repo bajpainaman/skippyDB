@@ -44,6 +44,39 @@ have owners.
   `main-5m.json` / `phaseN-5m.json`. 40M bench unaffected. Every phase uses
   the same flags, so ratios stay honest.
 
+## Phase 0 trace — how to read it
+
+The `SKIPPY_TRACE=1` env gate wraps each phase of
+`FlusherShard::flush_gpu_resident` with an `Instant` timer that prints
+`TRACE shard=S height=H phase=P us=U` to stderr. Run + post-process:
+
+```
+SKIPPY_TRACE=1 cargo run --release --features cuda --bin speed \
+  -- --entry-count 5000000 2>/tmp/t.log
+grep '^TRACE' /tmp/t.log | awk '
+{ for (i=1;i<=NF;i++) { split($i,kv,"="); if (kv[1]=="phase") p=kv[2]; else if (kv[1]=="us") u=kv[2]; }
+  s[p]+=u; n[p]++; if (u>m[p]) m[p]=u }
+END { for (x in s) printf "%-20s n=%5d total_ms=%8.1f avg_us=%7.0f max_us=%7.0f\n",
+      x, n[x], s[x]/1000, s[x]/n[x], m[x] }'
+```
+
+eprintln! I/O inflates wall-clock ~3.5× while tracing is on — use the
+trace to read phase **shares**, not absolute times. First capture:
+`entry_append` = 64% of per-shard block time (the Tree-append + deactive
+loop). `sync_upper_nodes` = 26%. `metadb_commit`, `flush_files_gpu` tiny.
+
+## Phase 4 Blake3 probe — FAILED (-13.9% at 40M cuda)
+
+- Branch: `rewrite/phase4-blake3` (commit a2045a4). Evidence JSON
+  copied to moonshot as `bench/results/phase4-blake3-40m.json`.
+- SHA-NI on Zen 3 makes CPU SHA256 ~as fast as Blake3 at 65B inputs;
+  force-CPU routing (no Blake3 CUDA kernel yet) disabled the existing
+  SoA GPU kernel that was carrying upper-tree sync. Net regression.
+- Reopen path: write a Blake3 CUDA kernel first, THEN redo the swap.
+  That's a weeks-long kernel port (the Blake3 tree structure is simple
+  but getting GPU warp-lane layout right takes care). Not cheap.
+- Don't re-attempt on CPU-only path expecting a win.
+
 ## Phase 3.1 fdatasync probe — FAILED, experimental branch retained
 
 - Tried `sync_all` → `sync_data` at `hpfile/src/lib.rs:314` on a
