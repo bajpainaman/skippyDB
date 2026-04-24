@@ -84,11 +84,13 @@ impl Flusher {
     }
 
     pub fn get_proof_req_senders(&self) -> Vec<SyncSender<ProofReqElem>> {
-        let mut v = Vec::with_capacity(SHARD_COUNT);
-        for i in 0..SHARD_COUNT {
-            v.push(self.shards[i].proof_req_sender.clone());
-        }
-        v
+        // Phase 2.3e: driven from `self.shards.len()` (the runtime shard count)
+        // rather than the compile-time `SHARD_COUNT`. The Vec grew dynamically
+        // on `new()` so `.len()` is the authoritative count.
+        self.shards
+            .iter()
+            .map(|s| s.proof_req_sender.clone())
+            .collect()
     }
 
     pub fn flush(&mut self, shard_count: usize) {
