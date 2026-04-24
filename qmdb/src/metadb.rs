@@ -15,36 +15,63 @@ use std::{
     os::unix::fs::FileExt,
 };
 
+/// On-disk version envelope magic. Written at the head of every plaintext
+/// MetaInfo payload (inside the AES-GCM ciphertext when `tee_cipher` is on).
+///
+/// - Phase 2.2 format `b"SKIPV2\x00\x00"`. Anything else is rejected by
+///   `reload_from_file` and `with_dir_checked` so old DBs fail loudly instead
+///   of being silently reinitialized to defaults (the pre-2.2 behavior was
+///   a data-loss hazard).
+///
+/// When we bump the format again (Phase 3+), bump the last two bytes, add the
+/// new magic to the `recognize_magic` dispatch below, and leave the V2 path
+/// green for the duration of the deprecation window.
+pub const META_MAGIC_V2: &[u8; 8] = b"SKIPV2\x00\x00";
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct MetaInfo {
+    /// Number of shards the DB was built against. Recorded so a binary with a
+    /// different compile-time `SHARD_COUNT` refuses to reopen rather than
+    /// silently corrupt per-shard bookkeeping. Stamped by `MetaInfo::new` at
+    /// build time; validated by `MetaDB::with_dir_checked`.
+    ///
+    /// `shard_count` also sizes the `Box<[T]>` per-shard fields below — they
+    /// are length-prefixed by bincode, so the invariant
+    /// `self.shard_count as usize == self.<field>.len()` holds across every
+    /// serialize/deserialize round-trip.
+    pub shard_count: u32,
     pub curr_height: i64,
-    pub last_pruned_twig: [(u64, i64); SHARD_COUNT],
-    pub next_serial_num: [u64; SHARD_COUNT],
-    pub oldest_active_sn: [u64; SHARD_COUNT],
-    pub oldest_active_file_pos: [i64; SHARD_COUNT],
-    pub root_hash: [[u8; 32]; SHARD_COUNT],
+    pub last_pruned_twig: Box<[(u64, i64)]>,
+    pub next_serial_num: Box<[u64]>,
+    pub oldest_active_sn: Box<[u64]>,
+    pub oldest_active_file_pos: Box<[i64]>,
+    pub root_hash: Box<[[u8; 32]]>,
     pub root_hash_by_height: Vec<[u8; 32]>,
-    pub edge_nodes: [Vec<u8>; SHARD_COUNT],
-    pub twig_file_sizes: [i64; SHARD_COUNT],
-    pub entry_file_sizes: [i64; SHARD_COUNT],
-    pub first_twig_at_height: [(u64, i64); SHARD_COUNT],
+    pub edge_nodes: Box<[Vec<u8>]>,
+    pub twig_file_sizes: Box<[i64]>,
+    pub entry_file_sizes: Box<[i64]>,
+    pub first_twig_at_height: Box<[(u64, i64)]>,
     pub extra_data: String,
 }
 
 impl MetaInfo {
-    fn new() -> Self {
+    /// Build a fresh `MetaInfo` sized for `shard_count` shards. Every per-
+    /// shard boxed slice is allocated with the right length so downstream
+    /// setters can index `[shard_id]` without bounds juggling.
+    fn new(shard_count: usize) -> Self {
         Self {
+            shard_count: shard_count as u32,
             curr_height: 0,
-            last_pruned_twig: [(0, 0); SHARD_COUNT],
-            next_serial_num: [0; SHARD_COUNT],
-            oldest_active_sn: [0; SHARD_COUNT],
-            oldest_active_file_pos: [0; SHARD_COUNT],
-            root_hash: [[0; 32]; SHARD_COUNT],
+            last_pruned_twig: vec![(0u64, 0i64); shard_count].into_boxed_slice(),
+            next_serial_num: vec![0u64; shard_count].into_boxed_slice(),
+            oldest_active_sn: vec![0u64; shard_count].into_boxed_slice(),
+            oldest_active_file_pos: vec![0i64; shard_count].into_boxed_slice(),
+            root_hash: vec![[0u8; 32]; shard_count].into_boxed_slice(),
             root_hash_by_height: vec![],
-            edge_nodes: Default::default(),
-            twig_file_sizes: [0; SHARD_COUNT],
-            entry_file_sizes: [0; SHARD_COUNT],
-            first_twig_at_height: [(0, 0); SHARD_COUNT],
+            edge_nodes: vec![Vec::<u8>::new(); shard_count].into_boxed_slice(),
+            twig_file_sizes: vec![0i64; shard_count].into_boxed_slice(),
+            entry_file_sizes: vec![0i64; shard_count].into_boxed_slice(),
+            first_twig_at_height: vec![(0u64, 0i64); shard_count].into_boxed_slice(),
             extra_data: "".to_owned(),
         }
     }
@@ -61,6 +88,80 @@ pub struct MetaDB {
     pending_write: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Errors that `MetaDB::with_dir_checked` can surface. Introduced in Phase 2.1
+/// to stake out the contract for cross-topology reopen detection; Phase 2.2
+/// adds the on-disk detection logic (via a `MetaInfoV2` version envelope that
+/// records the shard count the DB was built against).
+#[derive(Debug, PartialEq, Eq)]
+pub enum MetaDbError {
+    /// The on-disk MetaInfo was built against `got` shards but the caller
+    /// asked for `expected`. Reopening would silently corrupt per-shard
+    /// bookkeeping (serial numbers, entry-file sizes, root hashes, …).
+    ShardCountMismatch { expected: usize, got: usize },
+    /// Found a MetaInfo file whose version envelope we don't recognize.
+    /// Covers both pre-V2 files (no magic) and future formats. Callers
+    /// should surface a "rebuild the DB" message rather than retry.
+    UnsupportedFormat { head: [u8; 8] },
+    /// Bincode couldn't parse the plaintext payload after the V2 magic.
+    /// Usually means the file was truncated or partially written during a
+    /// crash.
+    CorruptPayload(String),
+}
+
+impl std::fmt::Display for MetaDbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetaDbError::ShardCountMismatch { expected, got } => write!(
+                f,
+                "MetaDB shard-count mismatch: expected {}, on-disk claims {}",
+                expected, got
+            ),
+            MetaDbError::UnsupportedFormat { head } => write!(
+                f,
+                "MetaDB format not recognized (head={:02x?}); expected V2 magic {:02x?}",
+                head, META_MAGIC_V2
+            ),
+            MetaDbError::CorruptPayload(reason) => write!(
+                f,
+                "MetaDB payload could not be deserialized: {}",
+                reason
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MetaDbError {}
+
+/// Strip the V2 magic header from a plaintext MetaInfo blob and deserialize
+/// the rest. Returns `UnsupportedFormat` for anything that doesn't start with
+/// `META_MAGIC_V2` (which notably includes pre-2.2 files).
+fn parse_metainfo_v2(plaintext: &[u8]) -> Result<MetaInfo, MetaDbError> {
+    if plaintext.len() < META_MAGIC_V2.len() {
+        let mut head = [0u8; 8];
+        head[..plaintext.len()].copy_from_slice(plaintext);
+        return Err(MetaDbError::UnsupportedFormat { head });
+    }
+    let (magic, rest) = plaintext.split_at(META_MAGIC_V2.len());
+    if magic != META_MAGIC_V2 {
+        let mut head = [0u8; 8];
+        head.copy_from_slice(magic);
+        return Err(MetaDbError::UnsupportedFormat { head });
+    }
+    bincode::deserialize::<MetaInfo>(rest)
+        .map_err(|e| MetaDbError::CorruptPayload(e.to_string()))
+}
+
+/// Prepend `META_MAGIC_V2` to `bincode(info)` to produce the plaintext written
+/// to disk (or fed into AES-GCM when `tee_cipher` is on). Every commit path
+/// must route through this so on-disk files always carry the envelope.
+fn serialize_metainfo_v2(info: &MetaInfo) -> Vec<u8> {
+    let body = bincode::serialize(info).expect("MetaInfo serialization is infallible");
+    let mut out = Vec::with_capacity(META_MAGIC_V2.len() + body.len());
+    out.extend_from_slice(META_MAGIC_V2);
+    out.extend_from_slice(&body);
+    out
+}
+
 fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
     let mut f = File::open(filename).expect("no file found");
     let metadata = fs::metadata(filename).expect("unable to read metadata");
@@ -71,7 +172,23 @@ fn get_file_as_byte_vec(filename: &String) -> Vec<u8> {
 }
 
 impl MetaDB {
-    pub fn with_dir(dir_name: &str, cipher: Option<Aes256Gcm>) -> Self {
+    /// Like [`Self::with_dir`], but validates that the on-disk MetaInfo was
+    /// built against `expected_shard_count`. Phase 2.x production code paths
+    /// that are prepared for a shard-count mismatch should call this instead
+    /// of `with_dir`.
+    ///
+    /// **Phase 2.1 (today):** wraps `with_dir` and always returns `Ok`. The
+    /// failing integration test at `tests/metadb_shard_count_mismatch.rs`
+    /// documents the intended contract.
+    ///
+    /// **Phase 2.2:** adds the `MetaInfoV2` version envelope that records the
+    /// DB's shard count and makes this method reject mismatches with
+    /// `Err(MetaDbError::ShardCountMismatch)`.
+    pub fn with_dir_checked(
+        dir_name: &str,
+        cipher: Option<Aes256Gcm>,
+        expected_shard_count: usize,
+    ) -> Result<Self, MetaDbError> {
         let meta_file_name = format!("{}/info", dir_name);
         let file_name = format!("{}/prune_helper", dir_name);
         if !Path::new(dir_name).exists() {
@@ -84,7 +201,60 @@ impl MetaDB {
             .open(file_name)
             .expect("no file found");
         let mut res = Self {
-            info: MetaInfo::new(),
+            info: MetaInfo::new(SHARD_COUNT),
+            meta_file_name,
+            history_file,
+            extra_data_map: Arc::new(DashMap::new()),
+            cipher,
+            pending_write: None,
+        };
+        // A fresh `info.0` doesn't exist yet — both slots are absent. In that
+        // case `reload_from_file_checked` is a no-op and `shard_count` stays
+        // at whatever the caller's `SHARD_COUNT` was stamped by
+        // `MetaInfo::new`. Validate the compare against that too so e.g.
+        // `with_dir_checked(fresh_dir, expected=99)` still fails fast.
+        res.reload_from_file_checked()?;
+        let got = res.info.shard_count as usize;
+        if got != expected_shard_count {
+            return Err(MetaDbError::ShardCountMismatch {
+                expected: expected_shard_count,
+                got,
+            });
+        }
+        Ok(res)
+    }
+
+    pub fn with_dir(dir_name: &str, cipher: Option<Aes256Gcm>) -> Self {
+        Self::with_dir_and_shard_count(dir_name, cipher, SHARD_COUNT)
+    }
+
+    /// Build a `MetaDB` sized for a specific runtime shard count. Matches
+    /// `with_dir` when `shard_count == SHARD_COUNT`.
+    ///
+    /// Use this from Phase 2.3+ callers that carry a `Topology`; `with_dir`
+    /// is retained for backward compatibility and pins to the compile-time
+    /// constant. On reload, the on-disk `shard_count` wins over the caller's
+    /// claim (so a 32-shard DB reopened via `with_dir_and_shard_count(.., 64)`
+    /// still loads at 32 — use `with_dir_checked` when you need the typed
+    /// mismatch error instead).
+    pub fn with_dir_and_shard_count(
+        dir_name: &str,
+        cipher: Option<Aes256Gcm>,
+        shard_count: usize,
+    ) -> Self {
+        let meta_file_name = format!("{}/info", dir_name);
+        let file_name = format!("{}/prune_helper", dir_name);
+        if !Path::new(dir_name).exists() {
+            fs::create_dir(dir_name).unwrap();
+        }
+        let history_file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(file_name)
+            .expect("no file found");
+        let mut res = Self {
+            info: MetaInfo::new(shard_count),
             meta_file_name,
             history_file,
             extra_data_map: Arc::new(DashMap::new()),
@@ -96,36 +266,41 @@ impl MetaDB {
     }
 
     pub fn reload_from_file(&mut self) {
-        let mut name = format!("{}.0", self.meta_file_name);
-        if Path::new(&name).exists() {
-            let mut meta_info_bz = get_file_as_byte_vec(&name);
-            if self.cipher.is_some() {
-                Self::decrypt(&self.cipher, &mut meta_info_bz);
-                let size = meta_info_bz.len();
-                meta_info_bz = meta_info_bz[8..size - TAG_SIZE].to_owned();
-            }
-            match bincode::deserialize::<MetaInfo>(&meta_info_bz[..]) {
-                Ok(info) => self.info = info,
-                Err(_) => warn!("Failed to deserialize {}, ignore it", name),
-            };
+        // Old lossy callers (everything except `with_dir_checked`) get the
+        // loud-panic behavior: V1 or corrupt files panic on reload instead
+        // of silently reinitializing to defaults — the pre-2.2 behavior was
+        // a data-loss hazard. Missing files are still fine (fresh DB).
+        if let Err(e) = self.reload_from_file_checked() {
+            panic!(
+                "MetaDB::reload_from_file: {} — old pre-V2 DBs must be rebuilt, \
+                 see TODO.md 'Phase 2.2 on-disk format bump'",
+                e
+            );
         }
-        name = format!("{}.1", self.meta_file_name);
-        if Path::new(&name).exists() {
-            let mut meta_info_bz = get_file_as_byte_vec(&name);
-            if self.cipher.is_some() {
-                Self::decrypt(&self.cipher, &mut meta_info_bz);
-                let size = meta_info_bz.len();
-                meta_info_bz = meta_info_bz[8..size - TAG_SIZE].to_owned();
+    }
+
+    /// Fallible reload path. Reads `{meta_file_name}.0` and `.1`, strips the
+    /// V2 magic envelope, and keeps the higher-`curr_height` winner. Used by
+    /// `with_dir_checked`; `reload_from_file` is a panicking wrapper for the
+    /// legacy `with_dir` callers.
+    pub fn reload_from_file_checked(&mut self) -> Result<(), MetaDbError> {
+        for slot in [0, 1] {
+            let name = format!("{}.{}", self.meta_file_name, slot);
+            if !Path::new(&name).exists() {
+                continue;
             }
-            match bincode::deserialize::<MetaInfo>(&meta_info_bz[..]) {
-                Ok(info) => {
-                    if info.curr_height > self.info.curr_height {
-                        self.info = info; //pick the latest one
-                    }
-                }
-                Err(_) => warn!("Failed to deserialize {}, ignore it", name),
-            };
+            let mut bz = get_file_as_byte_vec(&name);
+            if self.cipher.is_some() {
+                Self::decrypt(&self.cipher, &mut bz);
+                let size = bz.len();
+                bz = bz[8..size - TAG_SIZE].to_owned();
+            }
+            let candidate = parse_metainfo_v2(&bz)?;
+            if slot == 0 || candidate.curr_height > self.info.curr_height {
+                self.info = candidate;
+            }
         }
+        Ok(())
     }
 
     fn decrypt(cipher: &Option<Aes256Gcm>, bz: &mut [u8]) {
@@ -159,7 +334,7 @@ impl MetaDB {
         let kv = self.extra_data_map.remove(&self.info.curr_height).unwrap();
         self.info.extra_data = kv.1;
         let name = format!("{}.{}", self.meta_file_name, self.info.curr_height % 2);
-        let mut bz = bincode::serialize(&self.info).unwrap();
+        let mut bz = serialize_metainfo_v2(&self.info);
         if self.cipher.is_some() {
             let cipher = self.cipher.as_ref().unwrap();
             let mut nonce_arr = [0u8; NONCE_SIZE];
@@ -178,8 +353,9 @@ impl MetaDB {
             fs::write(&name, bz).unwrap();
         }
         if self.info.curr_height % PRUNE_EVERY_NBLOCKS == 0 && self.info.curr_height > 0 {
-            let mut data = [0u8; SHARD_COUNT * 16];
-            for shard_id in 0..SHARD_COUNT {
+            let shard_count = self.info.shard_count as usize;
+            let mut data = vec![0u8; shard_count * 16];
+            for shard_id in 0..shard_count {
                 let start = shard_id * 16;
                 let (twig_id, entry_file_size) = self.info.first_twig_at_height[shard_id];
                 LittleEndian::write_u64(&mut data[start..start + 8], twig_id);
@@ -187,7 +363,7 @@ impl MetaDB {
                 if self.cipher.is_some() {
                     let cipher = self.cipher.as_ref().unwrap();
                     let n = self.info.curr_height / PRUNE_EVERY_NBLOCKS;
-                    let pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * (16 + TAG_SIZE);
+                    let pos = (((n as usize - 1) * shard_count) + shard_id) * (16 + TAG_SIZE);
                     let mut nonce_arr = [0u8; NONCE_SIZE];
                     LittleEndian::write_u64(&mut nonce_arr[..8], pos as u64);
                     match cipher.encrypt_in_place_detached(
@@ -237,7 +413,7 @@ impl MetaDB {
             self.meta_file_name,
             self.info.curr_height % 2
         );
-        let meta_bytes = bincode::serialize(&self.info).unwrap();
+        let meta_bytes = serialize_metainfo_v2(&self.info);
         let write_data = if self.cipher.is_some() {
             let cipher = self.cipher.as_ref().unwrap();
             let mut nonce_arr = [0u8; NONCE_SIZE];
@@ -261,9 +437,10 @@ impl MetaDB {
         let history_data = if self.info.curr_height % PRUNE_EVERY_NBLOCKS == 0
             && self.info.curr_height > 0
         {
-            let mut data = [0u8; SHARD_COUNT * 16];
+            let shard_count = self.info.shard_count as usize;
+            let mut data = vec![0u8; shard_count * 16];
             let mut history_segments: Vec<Vec<u8>> = Vec::new();
-            for shard_id in 0..SHARD_COUNT {
+            for shard_id in 0..shard_count {
                 let start = shard_id * 16;
                 let (twig_id, entry_file_size) =
                     self.info.first_twig_at_height[shard_id];
@@ -278,7 +455,7 @@ impl MetaDB {
                 if self.cipher.is_some() {
                     let cipher = self.cipher.as_ref().unwrap();
                     let n = self.info.curr_height / PRUNE_EVERY_NBLOCKS;
-                    let pos = (((n as usize - 1) * SHARD_COUNT) + shard_id)
+                    let pos = (((n as usize - 1) * shard_count) + shard_id)
                         * (16 + TAG_SIZE);
                     let mut nonce_arr = [0u8; NONCE_SIZE];
                     LittleEndian::write_u64(&mut nonce_arr[..8], pos as u64);
@@ -377,10 +554,11 @@ impl MetaDB {
     }
 
     pub fn get_first_twig_at_height(&self, shard_id: usize, height: i64) -> (u64, i64) {
+        let shard_count = self.info.shard_count as usize;
         let n = height / PRUNE_EVERY_NBLOCKS;
-        let mut pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * 16;
+        let mut pos = (((n as usize - 1) * shard_count) + shard_id) * 16;
         if self.cipher.is_some() {
-            pos = (((n as usize - 1) * SHARD_COUNT) + shard_id) * (16 + TAG_SIZE);
+            pos = (((n as usize - 1) * shard_count) + shard_id) * (16 + TAG_SIZE);
         }
         let mut buf = [0u8; 32];
         if self.cipher.is_some() {
@@ -487,7 +665,8 @@ impl MetaDB {
     pub fn init(&mut self) {
         let curr_height = 0;
         self.info.curr_height = curr_height;
-        for i in 0..SHARD_COUNT {
+        let shard_count = self.info.shard_count as usize;
+        for i in 0..shard_count {
             self.info.last_pruned_twig[i] = (0, 0);
             self.info.next_serial_num[i] = 0;
             self.info.oldest_active_sn[i] = 0;

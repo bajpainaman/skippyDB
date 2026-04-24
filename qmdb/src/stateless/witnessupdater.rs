@@ -12,9 +12,12 @@ use crate::{
 use super::witness::Witness;
 
 pub struct WitnessListUpdater {
-    witness_list: [Witness; SHARD_COUNT],
+    // Phase 2.3b: was `[Witness; SHARD_COUNT]` / `[BTreeMap<u64, usize>; SHARD_COUNT]`.
+    // Boxed for runtime sizing (seqads / stateless mode accepts whatever
+    // shard count the builder hands it).
+    witness_list: Box<[Witness]>,
     kh2e_map: BTreeMap<Hash32, usize>,
-    sn2e_map_list: [BTreeMap<u64, usize>; SHARD_COUNT],
+    sn2e_map_list: Box<[BTreeMap<u64, usize>]>,
     pub entry_vec: EntryVec,
     curr_version: i64,
     next_sn_list: Vec<u64>,
@@ -28,7 +31,7 @@ pub struct WitnessListUpdater {
 
 impl WitnessListUpdater {
     pub fn new(
-        witness_list: [Witness; SHARD_COUNT],
+        witness_list: Box<[Witness]>,
         entry_vec: EntryVec,
         next_sn_list: Vec<u64>,
         oldest_active_sn_list: Vec<u64>,
@@ -37,9 +40,11 @@ impl WitnessListUpdater {
         utilization_ratio: i64,
         compact_thres: i64,
     ) -> Self {
+        let shard_count = witness_list.len();
         let mut kh2e_map = BTreeMap::new();
-        let mut sn2e_map_list = [(); SHARD_COUNT].map(|_| BTreeMap::new());
-        for shard_id in 0..SHARD_COUNT {
+        let mut sn2e_map_list: Box<[BTreeMap<u64, usize>]> =
+            (0..shard_count).map(|_| BTreeMap::new()).collect();
+        for shard_id in 0..shard_count {
             for (idx, e) in entry_vec.enumerate(shard_id) {
                 let key_hash = e.key_hash();
                 kh2e_map.insert(key_hash, idx);

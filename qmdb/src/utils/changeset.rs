@@ -6,8 +6,10 @@ use std::cmp::Ordering;
 pub struct ChangeSet {
     pub data: Vec<u8>,
     pub op_list: Vec<ChangeOp>,
-    shard_starts: [u32; SHARD_COUNT],
-    shard_op_count: [u32; SHARD_COUNT],
+    // Phase 2.3b: was `[u32; SHARD_COUNT]`. Sized from `SHARD_COUNT` at
+    // construction time until 2.3b-v lifts the `Topology::new` assertion.
+    shard_starts: Box<[u32]>,
+    shard_op_count: Box<[u32]>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -32,8 +34,8 @@ impl ChangeSet {
         Self {
             data: Vec::with_capacity(1000),
             op_list: Vec::with_capacity(10),
-            shard_starts: [u32::MAX; SHARD_COUNT],
-            shard_op_count: [0u32; SHARD_COUNT],
+            shard_starts: vec![u32::MAX; SHARD_COUNT].into_boxed_slice(),
+            shard_op_count: vec![0u32; SHARD_COUNT].into_boxed_slice(),
         }
     }
 
@@ -41,8 +43,8 @@ impl ChangeSet {
         Self {
             data: Vec::with_capacity(0),
             op_list: Vec::with_capacity(0),
-            shard_starts: [u32::MAX; SHARD_COUNT],
-            shard_op_count: [0u32; SHARD_COUNT],
+            shard_starts: vec![u32::MAX; SHARD_COUNT].into_boxed_slice(),
+            shard_op_count: vec![0u32; SHARD_COUNT].into_boxed_slice(),
         }
     }
 

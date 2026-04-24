@@ -800,13 +800,13 @@ impl UnitBuilder {
 
 pub struct InMemIndexerGeneric<U: UnitTrait> {
     units: Vec<RwLock<U>>,
-    sizes: [AtomicUsize; SHARD_COUNT],
+    // Phase 2.3b: was `[AtomicUsize; SHARD_COUNT]`. Boxed so future runtime-
+    // shard-count builds don't require a compile-time size.
+    sizes: Box<[AtomicUsize]>,
 }
 
 pub type InMemIndexer = InMemIndexerGeneric<Unit>;
 pub type InMemIndexer4Test = InMemIndexerGeneric<Unit4Test>;
-
-const ZERO: AtomicUsize = AtomicUsize::new(0);
 
 impl<U: UnitTrait + 'static> InMemIndexerGeneric<U> {
     pub fn with_dir(_dir: String) -> Self {
@@ -819,9 +819,12 @@ impl<U: UnitTrait + 'static> InMemIndexerGeneric<U> {
 
     // n is 65536 in production, and it can be smaller in test
     pub fn new(n: usize) -> Self {
+        let sizes: Box<[AtomicUsize]> = (0..SHARD_COUNT)
+            .map(|_| AtomicUsize::new(0))
+            .collect();
         let mut res = Self {
             units: Vec::with_capacity(n),
-            sizes: [ZERO; SHARD_COUNT],
+            sizes,
         };
         for _ in 0..n {
             res.units.push(RwLock::new(U::new()));
