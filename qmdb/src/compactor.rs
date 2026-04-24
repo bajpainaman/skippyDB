@@ -181,6 +181,7 @@ mod compactor_tests {
             1,
             0,
             0,
+            1, // workers_per_shard: single-threaded for tests
         );
         updater.compact(None, 0);
         // assert_eq!(updater.sn_start, bz1.serial_number() + 1);

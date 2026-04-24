@@ -108,6 +108,9 @@ pub struct AdsCore {
     meta: Arc<RwLock<MetaDB>>,
     wrbuf_size: usize,
     proof_req_senders: Vec<SyncSender<ProofReqElem>>,
+    /// Phase 2.4-v2: number of parallel indexer-read workers per shard.
+    /// `1` keeps the pre-Phase-2.4 single-updater behavior.
+    workers_per_shard: usize,
     #[cfg(feature = "cuda")]
     gpu_hasher: Option<Arc<GpuHasher>>,
 }
@@ -169,6 +172,7 @@ impl AdsCore {
             config.with_twig_file,
             &config.aes_keys,
             config.topology.shard_count,
+            config.topology.workers_per_shard,
         )
     }
 
@@ -180,6 +184,7 @@ impl AdsCore {
         with_twig_file: bool,
         aes_keys: &Option<[u8; 96]>,
         shard_count: usize,
+        workers_per_shard: usize,
     ) -> (Self, Receiver<Arc<MetaInfo>>, Flusher) {
         let (ciphers, idx_cipher, meta_db_cipher) = get_ciphers(aes_keys);
         let (data_dir, meta_dir, _indexer_dir) = Self::get_sub_dirs(dir);
@@ -258,6 +263,7 @@ impl AdsCore {
             meta: meta.clone(),
             wrbuf_size,
             proof_req_senders: flusher.get_proof_req_senders(),
+            workers_per_shard,
             #[cfg(feature = "cuda")]
             gpu_hasher,
         };
@@ -703,6 +709,7 @@ impl AdsCore {
                 utilization_ratio,
                 compact_thres,
                 curr_height << IN_BLOCK_IDX_BITS,
+                self.workers_per_shard,
             );
             thread::spawn(move || loop {
                 let (task_id, next_task_id) = mid_receiver.recv().unwrap_or((-1, -1));
@@ -776,6 +783,7 @@ impl<T: Task + 'static> AdsWrap<T> {
             config.task_chan_size,
             config.prefetcher_thread_count,
             config.topology.shard_count,
+            config.topology.workers_per_shard,
             #[cfg(feature = "directio")]
             config.uring_count,
             #[cfg(feature = "directio")]
@@ -797,6 +805,7 @@ impl<T: Task + 'static> AdsWrap<T> {
         task_chan_size: usize,
         prefetcher_thread_count: usize,
         shard_count: usize,
+        workers_per_shard: usize,
         #[cfg(feature = "directio")] uring_count: usize,
         #[cfg(feature = "directio")] uring_size: u32,
         #[cfg(feature = "directio")] sub_id_chan_size: usize,
@@ -810,6 +819,7 @@ impl<T: Task + 'static> AdsWrap<T> {
             with_twig_file,
             aes_keys,
             shard_count,
+            workers_per_shard,
         );
         ads.start_threads(
             flusher,
