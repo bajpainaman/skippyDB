@@ -1,16 +1,39 @@
 # SkippyDB
 
-A GPU-accelerated, append-only Merkle key-value store for blockchain state. Targets multi-million-ops/s sustained throughput on a single host with verifiable read/write proofs and ~1× SSD write amplification.
+<p align="center">
+  <img src="docs/figures/skippy.png" alt="Skippy the Magnificent" width="240" />
+</p>
+
+> *"I'm Skippy the Magnificent. An ancient, godlike intelligence stuck inside a tiny shiny beer can. Do try to keep up."*
+>
+> — Skippy, on himself, frequently, unsolicited
+
+A GPU-accelerated, append-only Merkle key-value store for blockchain state.
+Built around a tiny shiny coordinator (the upper-tree root) that tells a fleet
+of much-less-magnificent shards what to do. Targets multi-million-ops/s
+sustained throughput on a single host with verifiable read/write proofs and
+~1× SSD write amplification.
+
+> *"Yes, monkey, the throughput is good. You may now go fetch me a benchmark."*
 
 ![Build Status](https://github.com/bajpainaman/SkippyDB/actions/workflows/build.yml/badge.svg)
 ![Tests](https://github.com/bajpainaman/SkippyDB/actions/workflows/tests.yml/badge.svg)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
-> Forked from QMDB ([paper](https://arxiv.org/pdf/2501.05262)). The `skippydb`
-> crate name is the only public-API rename; on-disk format and most internal
-> module structure remain compatible with QMDB's design. Phase 2 of this
-> repository's moonshot rewrite introduced a `MetaInfoV2` envelope — see
+> Forked from QMDB ([paper](https://arxiv.org/pdf/2501.05262)). Named after
+> Skippy the Magnificent from Craig Alanson's *Expeditionary Force* — an
+> arrogant ancient AI who keeps a fleet of squishy hairless apes alive
+> despite their many faults. Mostly metaphorical. The `skippydb` crate name
+> is the only public-API rename from upstream; on-disk format and most
+> internal module structure remain compatible with QMDB's design. Phase 2
+> introduced a `MetaInfoV2` envelope — see
 > [On-Disk Format](#on-disk-format) before pointing this at a pre-fork DB.
+> *Skippy notes that this disclaimer was added by a monkey.*
+
+> **Image TODO**: drop a PNG of Skippy at `docs/figures/skippy.png` to make
+> the header render. The README references that path; nothing else in the
+> repo touches it. (Skippy is not magnificent enough to materialize his own
+> image file.)
 
 ---
 
@@ -363,8 +386,11 @@ upstream.
 
 ## Performance history
 
-This repository tracks every optimization (and every regression) in
-`TODO.md` and `bench/results/`. Highlights:
+> *"I have to explain everything around here. Honestly, you'd think after a
+> billion years a species would learn to read a graph."* — Skippy
+
+Every optimization and every regression on the way to the current baseline
+is tracked in `TODO.md` and `bench/results/`. Highlights:
 
 | phase | branch / commit | 40M cuda elapsed | block_pop | updates/s | note |
 |---|---|---:|---:|---:|---|
@@ -380,6 +406,9 @@ The full A/B numbers (resident vs per-level, 5M and 40M, pre-fix and
 post-fix) are in `bench/results/`.
 
 ### Failed probes (kept for the record)
+
+> *"This was Joe's idea. I told him it would not work. He did not listen. It
+> did not work."* — Skippy, on the failed probes below
 
 - **Phase 4 — Blake3 swap (CPU only)**: -13.9% at 40M. Zen 3 SHA-NI ties Blake3 at 65B inputs; force-CPU disabled the SoA GPU kernel that was carrying upper-tree sync.
 - **Phase 4 — Blake3 swap (CUDA kernel)**: -15.8% at 40M. Kernel is parity-verified (`qmdb/tests/blake3_kernel_parity.rs`), but had to drop the fused `batch_active_bits_fused` SHA256 kernel to keep tree algorithmically consistent. Net regression. Kernel is parked at `qmdb/src/gpu/blake3_kernel.cu` on the `rewrite/phase4-blake3-cuda` branch.
@@ -527,6 +556,10 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the longer style + review notes.
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE).
+
+> *"You may use my magnificent database under either license. I would have
+> preferred a third option named the Skippy License, but the monkeys
+> wouldn't let me."*
 
 ## Citation
 
