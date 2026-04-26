@@ -38,6 +38,29 @@ fn trace_enabled() -> bool {
         .load(Ordering::Relaxed)
 }
 
+/// Phase 0-second-capture A/B gate: when `SKIPPY_NO_GPU_RESIDENT=1`, the
+/// flusher skips `sync_upper_nodes_gpu_resident` and uses the per-level
+/// `sync_upper_nodes_gpu` instead. Lets us test whether the resident path's
+/// every-block bulk-populate of all twig roots + all nodes (tree.rs:614-628)
+/// is actually paying off vs the per-level launches it replaces.
+static NO_GPU_RESIDENT: OnceLock<AtomicBool> = OnceLock::new();
+
+#[inline]
+fn no_gpu_resident() -> bool {
+    NO_GPU_RESIDENT
+        .get_or_init(|| AtomicBool::new(std::env::var_os("SKIPPY_NO_GPU_RESIDENT").is_some()))
+        .load(Ordering::Relaxed)
+}
+
+static ROOT_DUMP: OnceLock<AtomicBool> = OnceLock::new();
+
+#[inline]
+fn root_dump_enabled() -> bool {
+    ROOT_DUMP
+        .get_or_init(|| AtomicBool::new(std::env::var_os("SKIPPY_ROOT_DUMP").is_some()))
+        .load(Ordering::Relaxed)
+}
+
 #[inline]
 fn trace_phase<R>(
     shard_id: usize,
@@ -619,15 +642,34 @@ impl FlusherShard {
         let shard_id_self = self.shard_id;
 
         // 1. Read entries from buffer and append to tree (same as CPU/GPU path)
+        //
+        // Phase 0 sub-trace: `entry_append` was 64% of per-shard block time in
+        // the initial capture, as a composite of read_next_entry + append_entry
+        // + deactive_entry. Accumulate per-sub-phase `Duration` and emit once
+        // so we don't flood stderr at ~200K calls/block.
         trace_phase(shard_id_self, curr_height, "entry_append", || {
             let buf_read = self.buf_read.as_mut().unwrap();
+            let tracing = trace_enabled();
+            let mut t_read = std::time::Duration::ZERO;
+            let mut t_append = std::time::Duration::ZERO;
+            let mut t_deactive = std::time::Duration::ZERO;
+            let mut n_entries: u64 = 0;
+            let mut n_deactive: u64 = 0;
             loop {
                 let mut file_pos: i64 = 0;
+                let t0 = if tracing { Some(std::time::Instant::now()) } else { None };
                 let (is_end_of_block, expected_file_pos) = buf_read.read_next_entry(|entry_bz| {
+                    if let Some(t) = t0 { t_read += t.elapsed(); }
+                    let t1 = if tracing { Some(std::time::Instant::now()) } else { None };
                     file_pos = self.tree.append_entry(&entry_bz).unwrap();
+                    if let Some(t) = t1 { t_append += t.elapsed(); }
+                    if tracing { n_entries += 1; }
+                    let t2 = if tracing { Some(std::time::Instant::now()) } else { None };
                     for (_, dsn) in entry_bz.dsn_iter() {
                         self.tree.deactive_entry(dsn);
+                        if tracing { n_deactive += 1; }
                     }
+                    if let Some(t) = t2 { t_deactive += t.elapsed(); }
                 });
                 if !is_end_of_block && file_pos != expected_file_pos {
                     panic!("File_pos mismatch!");
@@ -635,6 +677,20 @@ impl FlusherShard {
                 if is_end_of_block {
                     break;
                 }
+            }
+            if tracing {
+                eprintln!(
+                    "TRACE shard={} height={} phase=ea_read_buf us={} n={}",
+                    shard_id_self, curr_height, t_read.as_micros(), n_entries
+                );
+                eprintln!(
+                    "TRACE shard={} height={} phase=ea_append us={} n={}",
+                    shard_id_self, curr_height, t_append.as_micros(), n_entries
+                );
+                eprintln!(
+                    "TRACE shard={} height={} phase=ea_deactive us={} n={}",
+                    shard_id_self, curr_height, t_deactive.as_micros(), n_deactive
+                );
             }
         });
         let buf_read = self.buf_read.as_mut().unwrap();
@@ -715,10 +771,14 @@ impl FlusherShard {
                 "sync_upper_nodes",
                 || {
                     if let Some(store) = gpu_store {
-                        let _ = store.clear();
-                        upper_tree.sync_upper_nodes_gpu_resident(
-                            gpu, store, n_list, youngest_twig_id,
-                        )
+                        if no_gpu_resident() {
+                            upper_tree.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
+                        } else {
+                            let _ = store.clear();
+                            upper_tree.sync_upper_nodes_gpu_resident(
+                                gpu, store, n_list, youngest_twig_id,
+                            )
+                        }
                     } else {
                         upper_tree.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
                     }
@@ -756,6 +816,18 @@ impl FlusherShard {
                     guard.set_last_pruned_twig(shard_id, end_twig_id, ef_size);
                 }
                 guard.set_root_hash(shard_id, root_hash);
+                // Phase 0-second-capture root-hash A/B parity dump. When
+                // SKIPPY_ROOT_DUMP=1 is set, every committed root_hash is
+                // emitted to stderr so two runs (resident vs per-level) can
+                // be diffed for byte-equality before flipping the default.
+                if root_dump_enabled() {
+                    let mut hex = String::with_capacity(64);
+                    for b in &root_hash {
+                        use std::fmt::Write;
+                        let _ = write!(hex, "{:02x}", b);
+                    }
+                    eprintln!("ROOT shard={} height={} root={}", shard_id, curr_height, hex);
+                }
                 guard.set_oldest_active_sn(shard_id, compact_done_sn);
                 guard.set_oldest_active_file_pos(shard_id, compact_done_pos);
                 guard.set_next_serial_num(shard_id, sn_end);

@@ -15,7 +15,23 @@ pub static mut ADS: [Option<AdsWrap<SimpleTask>>; 2] = [None, None];
 pub fn init(qmdb_dir: &str, table_id: usize) {
     // init QMDB
     let qmdb_dir_with_table_id = format!("{}-{}", qmdb_dir, table_id);
-    let config = Config::from_dir(&qmdb_dir_with_table_id);
+    let mut config = Config::from_dir(&qmdb_dir_with_table_id);
+    // Phase 2.4-v2: read workers_per_shard from env so the bench can sweep
+    // {1, 2, 4} without a CLI change. Falls back to 1 (current default).
+    if let Ok(raw) = std::env::var("SKIPPY_WORKERS_PER_SHARD") {
+        if let Ok(n) = raw.parse::<usize>() {
+            if n >= 1 {
+                config.topology = skippydb::topology::Topology::new(
+                    config.topology.shard_count,
+                    n,
+                );
+                eprintln!(
+                    "[bench] SKIPPY_WORKERS_PER_SHARD={} (topology={:?})",
+                    n, config.topology
+                );
+            }
+        }
+    }
     AdsCore::init_dir(&config);
     let ads = AdsWrap::<SimpleTask>::new(&config);
     unsafe {
