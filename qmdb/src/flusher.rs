@@ -38,17 +38,20 @@ fn trace_enabled() -> bool {
         .load(Ordering::Relaxed)
 }
 
-/// Phase 0-second-capture A/B gate: when `SKIPPY_NO_GPU_RESIDENT=1`, the
-/// flusher skips `sync_upper_nodes_gpu_resident` and uses the per-level
-/// `sync_upper_nodes_gpu` instead. Lets us test whether the resident path's
-/// every-block bulk-populate of all twig roots + all nodes (tree.rs:614-628)
-/// is actually paying off vs the per-level launches it replaces.
-static NO_GPU_RESIDENT: OnceLock<AtomicBool> = OnceLock::new();
+/// Production default: the per-level `sync_upper_nodes_gpu` path. Set
+/// `SKIPPY_USE_GPU_RESIDENT=1` to opt into `sync_upper_nodes_gpu_resident`
+/// for benchmarking only — it produces byte-identical roots to per-level
+/// (post the 2026-04-26 NULL_TWIG.twig_root populate fix in `tree.rs`)
+/// but runs ~4.5× slower at 40M cuda because its every-block bulk-populate
+/// (`tree.rs:614-637`) does O(active set) H→D work each block while
+/// per-level only sends the small `n_list` per level. See TODO.md
+/// "Phase 0 second capture" for the A/B numbers.
+static USE_GPU_RESIDENT: OnceLock<AtomicBool> = OnceLock::new();
 
 #[inline]
-fn no_gpu_resident() -> bool {
-    NO_GPU_RESIDENT
-        .get_or_init(|| AtomicBool::new(std::env::var_os("SKIPPY_NO_GPU_RESIDENT").is_some()))
+fn use_gpu_resident() -> bool {
+    USE_GPU_RESIDENT
+        .get_or_init(|| AtomicBool::new(std::env::var_os("SKIPPY_USE_GPU_RESIDENT").is_some()))
         .load(Ordering::Relaxed)
 }
 
@@ -770,18 +773,15 @@ impl FlusherShard {
                 curr_height,
                 "sync_upper_nodes",
                 || {
-                    if let Some(store) = gpu_store {
-                        if no_gpu_resident() {
-                            upper_tree.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
-                        } else {
+                    if use_gpu_resident() {
+                        if let Some(store) = gpu_store {
                             let _ = store.clear();
-                            upper_tree.sync_upper_nodes_gpu_resident(
+                            return upper_tree.sync_upper_nodes_gpu_resident(
                                 gpu, store, n_list, youngest_twig_id,
-                            )
+                            );
                         }
-                    } else {
-                        upper_tree.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
                     }
+                    upper_tree.sync_upper_nodes_gpu(gpu, n_list, youngest_twig_id)
                 },
             );
 
