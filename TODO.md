@@ -216,15 +216,28 @@ gpu::integration_tests::tests::test_single_entry_cpu_vs_gpu
 gpu::integration_tests::tests::test_twig_eviction_cpu_vs_gpu
 ```
 
-All panic at `merkletree/check.rs:31` "Not Equal". The 2026-04-26 parity
-fix above did NOT rescue any of these — they fail at `check_hash_consistency`
-which validates `twig.active_bits_mtl1` (set by `sync_l1`/`sync_l2`/`sync_l3`/
-`sync_top`, a separate active-bits Merkle code path) rather than the
-upper-tree-sync path the parity test exercises. So these are a SEPARATE
-bug class, not the same as the one the parity fix addresses. Investigation
-hook: compare `active_bits_mtl1[0]` against `hasher::hash1(8, active_bits.get_bits(0, 64))`
-(the assertion in `check.rs:88-91`) on a CPU vs GPU side and find where
-the bits or hash differ.
+All panic at `merkletree/check.rs:31` "Not Equal".
+
+Update 2026-04-26 (later in same session): investigated. **These are test
+bugs, not engine bugs.** The pre-existing tests run partial pipelines
+(e.g. `sync_mt_for_youngest_twig` only, or `phase1` only) and then call
+`check_hash_consistency` which validates EVERY twig field including
+`active_bits_mtl2[i]`, `active_bits_mtl3`, and `twig_root` — fields that
+are only set by `phase2` (`sync_l2`/`sync_l3`/`sync_top`). Both CPU and
+GPU sides produce the same partially-synced state, so `check_hash_consistency`
+fails on tree_cpu first and the panic surface looks like a CPU-vs-GPU
+divergence when it's actually CPU-vs-`check_hash_consistency-expects-full-sync`.
+
+Validated by `qmdb/tests/active_bits_sync_parity.rs` (added 2026-04-26):
+runs phase1 + phase2 on both CPU and GPU over the same input, compares
+`active_bits_mtl1[0..4]` + `mtl2[0..2]` + `mtl3` + `twig_root` for every
+active twig — passes byte-equal in both `no_deactivations` and
+`with_deactivations` cases. The active-bits GPU pipeline is correct.
+
+Fix: each failing test either needs to add `sync_mt_for_active_bits_phase2`
+after phase1 before calling `check_hash_consistency`, or stop calling
+`check_hash_consistency` at all (it's a full-pipeline assertion, not a
+partial-state debug helper). Low-priority cleanup; code is correct.
 
 ## Phase 4 Blake3 probe — FAILED (-13.9% at 40M cuda)
 
