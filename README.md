@@ -99,8 +99,9 @@ Traditional databases suffer from write amplification on SSDs when maintaining a
 │                                      └────────────────────────┘  │
 │                                                                  │
 │  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │ Indexer │  │EntryFile │  │ TwigFile │  │    MetaDB        │  │
-│  │ (B-tree)│  │ (HPFile) │  │ (HPFile) │  │   (RocksDB)      │  │
+│  │ Indexer │  │EntryFile │  │ TwigFile │  │     MetaDB       │  │
+│  │ (B-tree)│  │ (HPFile) │  │ (HPFile) │  │ (custom 2-file   │  │
+│  │         │  │          │  │          │  │  ping-pong)      │  │
 │  └─────────┘  └──────────┘  └──────────┘  └──────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -353,7 +354,7 @@ my_db/
 ├── data/
 │   ├── entries0..entries15   (16 entry files, one per shard)
 │   └── twig0..twig15         (16 twig files, if with_twig_file=true)
-├── metadb/                   (RocksDB for metadata)
+├── metadb/                   (custom two-file ping-pong store)
 └── idx/                      (B-tree indexer data)
 ```
 
@@ -536,16 +537,28 @@ let hashes = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
 
 ## Performance
 
-Tested on commodity hardware with NVMe SSDs:
+Measured on `skippy-dev` (AMD Ryzen 9 5900X · RTX 4080 SUPER · 46 GB RAM ·
+ext4 on NVMe Gen4) at 40M-entry cuda bench, `bench/results/perlevel-default-40m.json`:
 
-| Metric | SkippyDB | RocksDB | Improvement |
-|---|---|---|---|
-| Sequential writes | ~1.2M ops/s | ~200K ops/s | **6x** |
-| Random reads | ~800K ops/s | ~500K ops/s | **1.6x** |
-| Proof generation | <1ms | N/A | — |
-| Write amplification | ~1.0x | ~10-30x | **10-30x** |
+| Metric | SkippyDB | Notes |
+|---|---|---|
+| Sequential updates | **1.35M ops/s** | 40M-entry workload, GPU per-level Merkle |
+| Random reads | **1.60M ops/s** | Same workload, post-population |
+| Inserts | **1.12M ops/s** | Cold writes |
+| Transactions | **47.5K txns/s** | End-to-end TPS |
+| Block population | **11.1 blocks/s** | 100K ops/block |
+| Proof generation | <1ms | — |
+| Write amplification | ~1.0x | vs ~10-30x for RocksDB |
 
-GPU acceleration adds ~3-5x throughput improvement for Merkle tree hashing at batch sizes >10K.
+Reproduce with `cargo run --release --features cuda --bin speed --
+--entry-count 40000000`. See `bench/results/` for the JSON + the
+A/B comparison vs the prior GPU-resident path.
+
+GPU acceleration is on by default (`--features cuda`). Set
+`SKIPPY_USE_GPU_RESIDENT=1` to opt into the legacy resident-store path
+for benchmark comparison only — at the time of this writing it is
+~4.5× slower than the per-level default at 40M cuda due to per-block
+H→D bulk-populate of the active-twig set.
 
 ---
 
@@ -581,7 +594,7 @@ SkippyDB/
 │   │   ├── flusher.rs             # Flusher pipeline stage
 │   │   ├── updater.rs             # Updater pipeline stage
 │   │   ├── compactor.rs           # Background compaction
-│   │   ├── metadb.rs              # RocksDB-backed metadata store
+│   │   ├── metadb.rs              # Custom two-file ping-pong metadata store
 │   │   └── utils/                 # Hasher, changeset, helpers
 │   ├── examples/
 │   │   ├── v2_demo.rs             # Basic usage example

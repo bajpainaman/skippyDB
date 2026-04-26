@@ -18,24 +18,26 @@ have owners.
 
 ## README / docs drift
 
-- README.md:104 architecture diagram says "MetaDB (RocksDB)". MetaDB is a
-  custom two-file ping-pong (metadb.rs), not RocksDB. Fix after Phase 1 so
-  the diagram reflects reality.
+- ~~README.md:104 architecture diagram says "MetaDB (RocksDB)".~~
+  **Fixed 2026-04-26.** Diagram and Directory Structure now both read
+  "custom two-file ping-pong".
 
-- README.md performance table (line ~543) cites "~1.2M ops/s sequential
-  writes". The only recorded benchmark on disk
-  (bench/benchmark-data.json: 161K updates/s) was produced on a GitHub
-  Actions `ubuntu-latest` VM with no GPU, 4-vCPU shared, `--entry-count
-  4000000`, all hover flags pinned to 1. Numbers don't match. Either rerun
-  on bench host and update, or qualify the claim.
+- ~~README.md performance table (line ~543) cites "~1.2M ops/s sequential
+  writes".~~ **Updated 2026-04-26** with the post-moonshot perlevel-default
+  baseline: 1.35M updates/s, 1.60M reads/s, 47.5K txns/s at 40M cuda on
+  skippy-dev.
 
 ## Bench
 
-- `bench/benchmark-data.json` is stale (CI smoke-test artifact). Move or
-  delete once rewrite/moonshot has credible baseline numbers.
+- ~~`bench/benchmark-data.json` is stale (CI smoke-test artifact).~~
+  **Deleted 2026-04-26.** The post-moonshot baselines live in
+  `bench/results/perlevel-default-40m.json` (production default) and the
+  matching A/B comparison files. README perf tables in `README.md` and
+  `bench/README.md` cite those numbers.
 
-- `bench/README.md` is a one-line stub. Fill in once bench/results/ has real
-  data.
+- ~~`bench/README.md` is a one-line stub.~~ **Filled in 2026-04-26** with
+  env-toggle docs (`SKIPPY_TRACE`, `SKIPPY_USE_GPU_RESIDENT`,
+  `SKIPPY_WORKERS_PER_SHARD`) and reference baselines.
 
 - **Ultraplan drift: `--entry-count 4000000` fails precondition** at
   `bench/src/bin/speed.rs:74` (`blocks_for_db_population=40 < tps_blocks=50`
