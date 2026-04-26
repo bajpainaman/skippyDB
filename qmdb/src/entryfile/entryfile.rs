@@ -213,7 +213,6 @@ impl EntryFileWithPreReader {
         let mut pos = start_pos;
         let size = self.entry_file.size();
         let mut buf = Vec::with_capacity(DEFAULT_ENTRY_SIZE);
-        let mut iter = 0;
 
         while pos < size {
             let read_len = match self.read_entry(pos, size, &mut buf) {
@@ -233,7 +232,6 @@ impl EntryFileWithPreReader {
             let keep_going =
                 access(entry.key(), entry.value(), entry.serial_number(), pos);
             pos += read_len as i64;
-            iter += 1;
             if !keep_going {
                 break;
             }

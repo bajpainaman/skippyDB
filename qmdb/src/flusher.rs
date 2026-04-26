@@ -1,6 +1,5 @@
 use crate::def::{
-    LEAF_COUNT_IN_TWIG, MAX_PROOF_REQ, MIN_PRUNE_COUNT, PRUNE_EVERY_NBLOCKS, SHARD_COUNT,
-    TWIG_SHIFT,
+    LEAF_COUNT_IN_TWIG, MAX_PROOF_REQ, MIN_PRUNE_COUNT, PRUNE_EVERY_NBLOCKS, TWIG_SHIFT,
 };
 use crate::entryfile::{EntryBufferReader, EntryFile};
 use crate::merkletree::proof::ProofPath;

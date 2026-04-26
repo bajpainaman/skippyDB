@@ -3,7 +3,6 @@ use aes_gcm::aead::AeadInPlace;
 use aes_gcm::Aes256Gcm;
 use byteorder::{ByteOrder, LittleEndian};
 use dashmap::DashMap;
-use log::warn;
 use std::{fs, path::Path, sync::Arc};
 
 #[cfg(feature = "in_sp1")]

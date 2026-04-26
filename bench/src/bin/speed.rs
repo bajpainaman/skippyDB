@@ -329,7 +329,8 @@ fn run_hover_tasks(
     test_gen: &mut TestGenV2,
     hover_recreate_block: u64,
     hover_write_block: u64,
-    num_read_latency_samples: u64,
+    // Reserved for `measure_read_latency` (currently unused — see helper).
+    _num_read_latency_samples: u64,
     results: &mut BenchmarkResults,
 ) {
     let op_in_blk = test_gen.num_op_in_blk();
@@ -510,6 +511,10 @@ fn generate_read_key(randsrc: &mut RandSrc, max_num: u64) -> [u8; 32 + 20] {
 //     results.record_throughput("reads", hover_read_count, bm_start.elapsed());
 // }
 
+// Read-latency micro-benchmark. Currently unused — `run_hover_tasks` measures
+// throughput, not latency. Kept available so a future bench bin invocation can
+// re-enable the per-sample timing without redefining the helper.
+#[allow(dead_code)]
 fn measure_read_latency(
     table_id: usize,
     max_num: u64,

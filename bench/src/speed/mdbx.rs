@@ -1,3 +1,10 @@
+// MDBX bench backend uses a single mutable static to hold the env across
+// the bench's task-loop callbacks (mirrors `qmdb.rs` and `rocksdb.rs`). The
+// 2024-edition `static_mut_refs` lint flags `.take()`/`&mut` access, but the
+// access pattern here is single-threaded by construction. The driver loop
+// owns the static for the duration of each call.
+#![allow(static_mut_refs)]
+
 use std::{fs, path::Path};
 
 use log::debug;

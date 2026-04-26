@@ -268,7 +268,7 @@ impl WitnessListUpdater {
         )
     }
 
-    fn get_oldest_active(&self, shard_id: usize) -> Option<EntryBz> {
+    fn get_oldest_active(&self, shard_id: usize) -> Option<EntryBz<'_>> {
         let sn = self.oldest_active_sn_list[shard_id];
         if let Some(next_sn) = self.witness_list[shard_id].find_next_active_sn(sn) {
             self.get_entry_by_sn(shard_id, next_sn)
@@ -277,21 +277,21 @@ impl WitnessListUpdater {
         }
     }
 
-    pub fn get_entry(&self, shard_id: usize, kh: &Hash32) -> Option<EntryBz> {
+    pub fn get_entry(&self, shard_id: usize, kh: &Hash32) -> Option<EntryBz<'_>> {
         if let Some(idx) = self.kh2e_map.get(kh) {
             return Some(self.entry_vec.get_entry(shard_id, *idx));
         }
         None
     }
 
-    fn get_entry_by_sn(&self, shard_id: usize, sn: u64) -> Option<EntryBz> {
+    fn get_entry_by_sn(&self, shard_id: usize, sn: u64) -> Option<EntryBz<'_>> {
         if let Some(idx) = self.sn2e_map_list[shard_id].get(&sn) {
             return Some(self.entry_vec.get_entry(shard_id, *idx));
         }
         None
     }
 
-    pub fn get_prev_entry(&self, shard_id: usize, kh: &Hash32) -> Option<(Hash32, EntryBz)> {
+    pub fn get_prev_entry(&self, shard_id: usize, kh: &Hash32) -> Option<(Hash32, EntryBz<'_>)> {
         let range = (Included(&[0u8; 32]), Excluded(kh));
         let last_opt = self
             .kh2e_map

@@ -26,8 +26,6 @@ use std::time;
 use tempfile::TempFile;
 use unit::Unit;
 
-const ZERO: AtomicUsize = AtomicUsize::new(0);
-
 fn new_temp_file(dir: &str, num: usize, part: usize) -> Arc<RwLock<TempFile>> {
     let fname = format!("{}/{:#010x}-{:#04x}", dir, num, part);
     Arc::new(RwLock::new(TempFile::new(fname)))

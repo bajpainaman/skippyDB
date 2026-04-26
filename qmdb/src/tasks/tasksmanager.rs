@@ -45,13 +45,13 @@ impl<T: Task> TasksManager<T> {
         task.get_change_sets()
     }
 
-    pub fn task_for_read(&self, idx: usize) -> RwLockReadGuard<Option<T>> {
+    pub fn task_for_read(&self, idx: usize) -> RwLockReadGuard<'_, Option<T>> {
         if idx >= self.tasks.len() {
             panic!("task index out of range");
         }
         self.tasks[idx].read()
     }
-    pub fn task_for_write(&self, idx: usize) -> RwLockWriteGuard<Option<T>> {
+    pub fn task_for_write(&self, idx: usize) -> RwLockWriteGuard<'_, Option<T>> {
         if idx >= self.tasks.len() {
             panic!("task index out of range");
         }

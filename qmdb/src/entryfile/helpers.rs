@@ -35,7 +35,7 @@ impl EntryBuilder {
         self
     }
 
-    pub fn build(&self) -> Entry {
+    pub fn build(&self) -> Entry<'_> {
         Entry {
             key: &self.key[..],
             value: &self.value[..],

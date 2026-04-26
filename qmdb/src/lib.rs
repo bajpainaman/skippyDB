@@ -87,7 +87,7 @@ use crate::merkletree::{
 use crate::metadb::{MetaDB, MetaInfo};
 #[cfg(feature = "cuda")]
 use crate::gpu::GpuHasher;
-use log::{debug, error, info};
+use log::{error, info};
 
 #[cfg(all(target_os = "linux", feature = "directio"))]
 use crate::dioprefetcher::{JobManager, Prefetcher};
