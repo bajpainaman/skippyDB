@@ -18,8 +18,13 @@ Assuming your SSD is mounted at `/mnt/nvme`:
 
 ```bash
 ulimit -n 65535
-# Runs the benchmark with 4 million entries in /tmp/QMDB
-cargo run --bin speed -- --entry-count 4000000
+# Smoke / dev bench (5M is the smallest size that satisfies the
+# bench's blocks_for_db_population >= tps_blocks precondition with
+# release defaults).
+cargo run --release --features cuda --bin speed -- --entry-count 5000000
+
+# Production-ish bench: 40M entries on this NVMe.
+cargo run --release --features cuda --bin speed -- --entry-count 40000000
 
 # Runs the benchmark with 7 billion entries
 cargo run --bin speed --release -- \
@@ -31,6 +36,28 @@ cargo run --bin speed --release -- \
     --hover-interval 1000 \
     --tps-blocks 500
 ```
+
+## Environment toggles
+
+- `SKIPPY_TRACE=1` — emit `TRACE shard=S height=H phase=P us=US` lines per
+  per-shard flusher phase. Adds noticeable wall-clock overhead (eprintln IO);
+  use only to read phase **shares**, not absolute timings.
+- `SKIPPY_USE_GPU_RESIDENT=1` — opt into the legacy GPU-resident upper-tree
+  sync path. Off by default; the per-level path is faster and produces
+  byte-identical roots (see `qmdb/tests/sync_upper_nodes_parity.rs`).
+- `SKIPPY_WORKERS_PER_SHARD=N` — set runtime `Topology.workers_per_shard`.
+  Default `1`. `>1` enables the experimental Phase 2.4-v2 parallel
+  indexer-read path; `W=1` is byte-identical to the prior production code.
+
+## Reference baselines (skippy-dev: 5900X · RTX 4080 SUPER · NVMe Gen4)
+
+| Bench size | elapsed | block_pop | updates | reads | transactions |
+|---|---:|---:|---:|---:|---:|
+| 5M cuda  | 10.5s | 14.1/s  | 1.68M/s | 1.55M/s | — |
+| 40M cuda | 49.5s | 11.1/s  | 1.35M/s | 1.60M/s | 47.5K/s |
+
+Per-block JSON files in `bench/results/`. These are the moonshot baselines
+post the 2026-04-26 per-level-default flip + NULL_TWIG.twig_root parity fix.
 
 ## Arguments for speed
 

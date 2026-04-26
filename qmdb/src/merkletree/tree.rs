@@ -611,7 +611,24 @@ impl UpperTree {
         // Collect twig roots and existing nodes at levels below what we need.
         let mut populate_pairs: Vec<(u64, [u8; 32])> = Vec::new();
 
-        // Add all active twig roots to the GPU store at TWIG_ROOT_LEVEL
+        // Pre-fill NULL_TWIG.twig_root at every twig position that might be
+        // read at FIRST_LEVEL_ABOVE_TWIG (i.e. 2*i and 2*i+1 for each i in
+        // n_list). The per-level path (sync_nodes_by_level_gpu, line 521-527)
+        // uses `unwrap_or(NULL_TWIG.twig_root)` to fall back when a twig is
+        // not in `active_twig_shards`. Without this pre-fill, the resident
+        // path's `bulk_get_device` returns uninitialized memory for missing
+        // twigs and produces a different parent hash. This is the
+        // resident-vs-per-level parity divergence root cause.
+        for &i in &n_list {
+            let pos_l = (TWIG_ROOT_LEVEL as u64) << 56 | (2 * i);
+            let pos_r = (TWIG_ROOT_LEVEL as u64) << 56 | (2 * i + 1);
+            populate_pairs.push((pos_l, twig::NULL_TWIG.twig_root));
+            populate_pairs.push((pos_r, twig::NULL_TWIG.twig_root));
+        }
+
+        // Add all active twig roots to the GPU store at TWIG_ROOT_LEVEL.
+        // These overwrite the NULL_TWIG.twig_root pre-fill above for any
+        // twig that actually exists.
         for twig_shard in &self.active_twig_shards {
             for (&key, twig) in twig_shard {
                 let pos_val = (TWIG_ROOT_LEVEL as u64) << 56 | key;

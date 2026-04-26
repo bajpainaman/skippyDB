@@ -1,5 +1,5 @@
 use byteorder::{BigEndian, ByteOrder};
-use kyumdb::utils::hasher;
+use skippydb::utils::hasher;
 
 #[derive(Debug, Clone)]
 pub struct ShuffleParam {

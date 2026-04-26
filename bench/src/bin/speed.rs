@@ -8,15 +8,15 @@ use bench::{
     speed::{db_backend, test_gen::TestGenV2},
 };
 
-use kyumdb::def::IN_BLOCK_IDX_BITS;
-use kyumdb::def::OP_CREATE;
-use kyumdb::def::OP_DELETE;
-use kyumdb::def::OP_READ;
-use kyumdb::def::OP_WRITE;
-use kyumdb::indexer::hybrid::index_cache::COUNTERS;
-use kyumdb::test_helper::RandSrc;
-use kyumdb::test_helper::SimpleTask;
-use kyumdb::utils::{byte0_to_shard_id, changeset::ChangeSet, hasher};
+use skippydb::def::IN_BLOCK_IDX_BITS;
+use skippydb::def::OP_CREATE;
+use skippydb::def::OP_DELETE;
+use skippydb::def::OP_READ;
+use skippydb::def::OP_WRITE;
+use skippydb::indexer::hybrid::index_cache::COUNTERS;
+use skippydb::test_helper::RandSrc;
+use skippydb::test_helper::SimpleTask;
+use skippydb::utils::{byte0_to_shard_id, changeset::ChangeSet, hasher};
 
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
@@ -329,7 +329,8 @@ fn run_hover_tasks(
     test_gen: &mut TestGenV2,
     hover_recreate_block: u64,
     hover_write_block: u64,
-    num_read_latency_samples: u64,
+    // Reserved for `measure_read_latency` (currently unused — see helper).
+    _num_read_latency_samples: u64,
     results: &mut BenchmarkResults,
 ) {
     let op_in_blk = test_gen.num_op_in_blk();
@@ -510,6 +511,10 @@ fn generate_read_key(randsrc: &mut RandSrc, max_num: u64) -> [u8; 32 + 20] {
 //     results.record_throughput("reads", hover_read_count, bm_start.elapsed());
 // }
 
+// Read-latency micro-benchmark. Currently unused — `run_hover_tasks` measures
+// throughput, not latency. Kept available so a future bench bin invocation can
+// re-enable the per-sample timing without redefining the helper.
+#[allow(dead_code)]
 fn measure_read_latency(
     table_id: usize,
     max_num: u64,

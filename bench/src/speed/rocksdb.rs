@@ -1,7 +1,13 @@
+// RocksDB bench backend uses a single mutable static to hold the DB across
+// the bench's task-loop callbacks (mirrors `qmdb.rs` and `mdbx.rs`). The
+// 2024-edition `static_mut_refs` lint flags `.take()`/`&mut` access, but the
+// access pattern here is single-threaded by construction.
+#![allow(static_mut_refs)]
+
 use std::{fs, path::Path};
 
 use parking_lot::RwLock;
-use kyumdb::{
+use skippydb::{
     def::{OP_CREATE, OP_DELETE, OP_READ, OP_WRITE},
     tasks::Task,
     test_helper::SimpleTask,

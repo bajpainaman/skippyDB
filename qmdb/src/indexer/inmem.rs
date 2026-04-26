@@ -68,7 +68,7 @@ impl BufList {
     }
 
     // get a readonly leaf
-    fn get_ro_leaf(&self, pos: u64) -> RoLeaf {
+    fn get_ro_leaf(&self, pos: u64) -> RoLeaf<'_> {
         let buf_idx = (pos >> 32) as usize;
         let offset = (pos as u32) as usize;
         let buf = self.list.get(buf_idx).unwrap();
@@ -81,7 +81,7 @@ impl BufList {
     }
 
     // get a read-write leaf
-    fn get_leaf(&mut self, pos: u64) -> Leaf {
+    fn get_leaf(&mut self, pos: u64) -> Leaf<'_> {
         let buf_idx = (pos >> 32) as usize;
         let offset = (pos as u32) as usize;
         let buf = self.list.get_mut(buf_idx).unwrap();
@@ -175,7 +175,7 @@ impl RoLeaf<'_> {
 }
 
 impl Leaf<'_> {
-    fn to_readonly(&self) -> RoLeaf {
+    fn to_readonly(&self) -> RoLeaf<'_> {
         RoLeaf { data: &*self.data }
     }
 
@@ -556,7 +556,7 @@ impl UnitTrait for Unit {
 }
 
 impl Unit {
-    fn find_prev_key_and_leaf(&self, k: u64) -> Option<(u64, RoLeaf)> {
+    fn find_prev_key_and_leaf(&self, k: u64) -> Option<(u64, RoLeaf<'_>)> {
         let last = self.bt.range((Included(&0u64), Excluded(&k))).next_back();
         if let Some((k_prev, pos)) = last {
             return Some((*k_prev, self.buf_list.get_ro_leaf(*pos)));
@@ -564,7 +564,7 @@ impl Unit {
         None
     }
 
-    fn find_key_and_leaf(&self, k: u64) -> Option<(u64, RoLeaf)> {
+    fn find_key_and_leaf(&self, k: u64) -> Option<(u64, RoLeaf<'_>)> {
         let (hi16, _) = split_hi_lo(k);
         let last = self.bt.range((Included(&hi16), Included(&k))).next_back();
         if let Some((k_prev, pos)) = last {
@@ -574,7 +574,7 @@ impl Unit {
         None
     }
 
-    fn find_leaf(&self, k: u64) -> Option<RoLeaf> {
+    fn find_leaf(&self, k: u64) -> Option<RoLeaf<'_>> {
         if let Some((_, leaf)) = self.find_key_and_leaf(k) {
             Some(leaf)
         } else {
@@ -800,13 +800,13 @@ impl UnitBuilder {
 
 pub struct InMemIndexerGeneric<U: UnitTrait> {
     units: Vec<RwLock<U>>,
-    sizes: [AtomicUsize; SHARD_COUNT],
+    // Phase 2.3b: was `[AtomicUsize; SHARD_COUNT]`. Boxed so future runtime-
+    // shard-count builds don't require a compile-time size.
+    sizes: Box<[AtomicUsize]>,
 }
 
 pub type InMemIndexer = InMemIndexerGeneric<Unit>;
 pub type InMemIndexer4Test = InMemIndexerGeneric<Unit4Test>;
-
-const ZERO: AtomicUsize = AtomicUsize::new(0);
 
 impl<U: UnitTrait + 'static> InMemIndexerGeneric<U> {
     pub fn with_dir(_dir: String) -> Self {
@@ -819,9 +819,12 @@ impl<U: UnitTrait + 'static> InMemIndexerGeneric<U> {
 
     // n is 65536 in production, and it can be smaller in test
     pub fn new(n: usize) -> Self {
+        let sizes: Box<[AtomicUsize]> = (0..SHARD_COUNT)
+            .map(|_| AtomicUsize::new(0))
+            .collect();
         let mut res = Self {
             units: Vec::with_capacity(n),
-            sizes: [ZERO; SHARD_COUNT],
+            sizes,
         };
         for _ in 0..n {
             res.units.push(RwLock::new(U::new()));

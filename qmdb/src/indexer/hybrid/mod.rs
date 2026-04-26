@@ -26,8 +26,6 @@ use std::time;
 use tempfile::TempFile;
 use unit::Unit;
 
-const ZERO: AtomicUsize = AtomicUsize::new(0);
-
 fn new_temp_file(dir: &str, num: usize, part: usize) -> Arc<RwLock<TempFile>> {
     let fname = format!("{}/{:#010x}-{:#04x}", dir, num, part);
     Arc::new(RwLock::new(TempFile::new(fname)))
@@ -105,9 +103,9 @@ pub struct HybridIndexer {
     dir: String,
     initializing: AtomicBool,
     units: Vec<Mutex<Unit>>,
-    // for merging control
-    sizes: [AtomicUsize; SHARD_COUNT],
-    change_counts: [AtomicUsize; SHARD_COUNT],
+    // Phase 2.3b: was `[AtomicUsize; SHARD_COUNT]`. Boxed for runtime sizing.
+    sizes: Box<[AtomicUsize]>,
+    change_counts: Box<[AtomicUsize]>,
     activebits: Vec<ActiveBits>,
     cipher: Arc<Option<Aes256Gcm>>,
 }
@@ -149,12 +147,16 @@ impl HybridIndexer {
             v.push(ActiveBits::with_capacity(1000));
         }
 
+        let sizes: Box<[AtomicUsize]> =
+            (0..SHARD_COUNT).map(|_| AtomicUsize::new(0)).collect();
+        let change_counts: Box<[AtomicUsize]> =
+            (0..SHARD_COUNT).map(|_| AtomicUsize::new(0)).collect();
         Self {
             dir,
             initializing: AtomicBool::new(true),
             units,
-            sizes: [ZERO; SHARD_COUNT],
-            change_counts: [ZERO; SHARD_COUNT],
+            sizes,
+            change_counts,
             activebits: v,
             cipher,
         }

@@ -2895,8 +2895,11 @@ mod tests {
             assert_eq!(t_cpu.mtree_for_youngest_twig[i], t_gpu.mtree_for_youngest_twig[i],
                 "YT 100 entries node {} mismatch", i);
         }
-        check_hash_consistency(&t_cpu);
-        check_hash_consistency(&t_gpu);
+        // (No check_hash_consistency: this test runs only the youngest-twig
+        // sync; check_hash_consistency is a full-pipeline invariant that
+        // also validates `upper_tree.nodes[FIRST_LEVEL_ABOVE_TWIG][0]`, which
+        // Tree::new initializes as a `[0; 32]` placeholder. CPU-vs-GPU parity
+        // for this subphase is already covered by the per-node assert above.)
         t_cpu.close(); t_gpu.close();
         let _ = std::fs::remove_dir_all(dir_cpu);
         let _ = std::fs::remove_dir_all(dir_gpu);
@@ -2915,8 +2918,6 @@ mod tests {
         t_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
         assert_eq!(t_cpu.mtree_for_youngest_twig[1], t_gpu.mtree_for_youngest_twig[1],
             "YT 1000 root mismatch");
-        check_hash_consistency(&t_cpu);
-        check_hash_consistency(&t_gpu);
         t_cpu.close(); t_gpu.close();
         let _ = std::fs::remove_dir_all(dir_cpu);
         let _ = std::fs::remove_dir_all(dir_gpu);
@@ -2954,8 +2955,6 @@ mod tests {
         t_gpu.sync_mt_for_youngest_twig_gpu(&gpu);
         assert_eq!(t_cpu.mtree_for_youngest_twig[1], t_gpu.mtree_for_youngest_twig[1],
             "Deact root mismatch");
-        check_hash_consistency(&t_cpu);
-        check_hash_consistency(&t_gpu);
         t_cpu.close(); t_gpu.close();
         let _ = std::fs::remove_dir_all(dir_cpu);
         let _ = std::fs::remove_dir_all(dir_gpu);
@@ -2977,8 +2976,6 @@ mod tests {
         let mut cs: Vec<u64> = cpu_nlist; cs.sort(); cs.dedup();
         let mut gs: Vec<u64> = gpu_nlist; gs.sort(); gs.dedup();
         assert_eq!(cs, gs, "Phase1 n_list mismatch");
-        check_hash_consistency(&t_cpu);
-        check_hash_consistency(&t_gpu);
         t_cpu.close(); t_gpu.close();
         let _ = std::fs::remove_dir_all(dir_cpu);
         let _ = std::fs::remove_dir_all(dir_gpu);

@@ -1,7 +1,7 @@
 use super::def::{L, PAGE_SIZE};
 use byteorder::{BigEndian, ByteOrder};
 use parking_lot::RwLock;
-use kyumdb::{
+use skippydb::{
     def::{OP_WRITE, SHARD_COUNT},
     indexer::Indexer,
     tasks::Task,

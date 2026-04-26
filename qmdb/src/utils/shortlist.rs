@@ -97,7 +97,7 @@ impl ShortList {
         }
     }
 
-    pub fn enumerate(&self) -> ShortListIter {
+    pub fn enumerate(&self) -> ShortListIter<'_> {
         ShortListIter { l: self, idx: 0 }
     }
 }

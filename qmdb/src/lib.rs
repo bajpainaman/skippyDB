@@ -1,4 +1,4 @@
-//! # KyumDB
+//! # SkippyDB
 //!
 //! A high-performance verifiable key-value store with SHA256 Merkle trees,
 //! designed for blockchain state storage. Supports sharded append-only entry
@@ -32,7 +32,7 @@
 //!
 //! With `--features cuda`, batch Merkle hash operations are dispatched to CUDA
 //! cores. See the [`gpu`] module and the
-//! [GPU Integration Guide](https://github.com/bajpainaman/kyumdb/blob/main/docs/gpu-integration-guide.md).
+//! [GPU Integration Guide](https://github.com/bajpainaman/SkippyDB/blob/main/docs/gpu-integration-guide.md).
 
 extern crate core;
 pub mod compactor;
@@ -50,6 +50,7 @@ pub mod metadb;
 pub mod seqads;
 pub mod stateless;
 pub mod tasks;
+pub mod topology;
 #[cfg(not(all(target_os = "linux", feature = "directio")))]
 pub mod uniprefetcher;
 pub mod updater;
@@ -86,7 +87,7 @@ use crate::merkletree::{
 use crate::metadb::{MetaDB, MetaInfo};
 #[cfg(feature = "cuda")]
 use crate::gpu::GpuHasher;
-use log::{debug, error, info};
+use log::{error, info};
 
 #[cfg(all(target_os = "linux", feature = "directio"))]
 use crate::dioprefetcher::{JobManager, Prefetcher};
@@ -107,6 +108,9 @@ pub struct AdsCore {
     meta: Arc<RwLock<MetaDB>>,
     wrbuf_size: usize,
     proof_req_senders: Vec<SyncSender<ProofReqElem>>,
+    /// Phase 2.4-v2: number of parallel indexer-read workers per shard.
+    /// `1` keeps the pre-Phase-2.4 single-updater behavior.
+    workers_per_shard: usize,
     #[cfg(feature = "cuda")]
     gpu_hasher: Option<Arc<GpuHasher>>,
 }
@@ -167,6 +171,8 @@ impl AdsCore {
             config.file_segment_size,
             config.with_twig_file,
             &config.aes_keys,
+            config.topology.shard_count,
+            config.topology.workers_per_shard,
         )
     }
 
@@ -177,6 +183,8 @@ impl AdsCore {
         file_segment_size: usize,
         with_twig_file: bool,
         aes_keys: &Option<[u8; 96]>,
+        shard_count: usize,
+        workers_per_shard: usize,
     ) -> (Self, Receiver<Arc<MetaInfo>>, Flusher) {
         let (ciphers, idx_cipher, meta_db_cipher) = get_ciphers(aes_keys);
         let (data_dir, meta_dir, _indexer_dir) = Self::get_sub_dirs(dir);
@@ -184,7 +192,19 @@ impl AdsCore {
         let dir = (dir.to_owned() + "/idx").to_owned();
         let indexer = Arc::new(Indexer::with_dir_and_cipher(dir, idx_cipher));
         let (eb_sender, eb_receiver) = sync_channel(2);
-        let meta = MetaDB::with_dir(&meta_dir, meta_db_cipher);
+        // Phase 2.3e: MetaDB now sized from `config.topology.shard_count`.
+        // Tree / Flusher / indexer still allocate per `SHARD_COUNT` — lifting
+        // those is the next 2.3e sub-commit. If `shard_count != SHARD_COUNT`,
+        // MetaDB will report a different shape than the rest of the pipeline,
+        // so assert parity here until the whole stack is topology-aware.
+        assert!(
+            shard_count == SHARD_COUNT,
+            "AdsCore only supports shard_count == SHARD_COUNT ({}) today; \
+             got {}. Phase 2.3e will thread topology through Tree/Flusher/\
+             indexer so arbitrary runtime shard counts work end-to-end.",
+            SHARD_COUNT, shard_count
+        );
+        let meta = MetaDB::with_dir_and_shard_count(&meta_dir, meta_db_cipher, shard_count);
         let curr_height = meta.get_curr_height();
         let meta = Arc::new(RwLock::new(meta));
 
@@ -243,6 +263,7 @@ impl AdsCore {
             meta: meta.clone(),
             wrbuf_size,
             proof_req_senders: flusher.get_proof_req_senders(),
+            workers_per_shard,
             #[cfg(feature = "cuda")]
             gpu_hasher,
         };
@@ -688,6 +709,7 @@ impl AdsCore {
                 utilization_ratio,
                 compact_thres,
                 curr_height << IN_BLOCK_IDX_BITS,
+                self.workers_per_shard,
             );
             thread::spawn(move || loop {
                 let (task_id, next_task_id) = mid_receiver.recv().unwrap_or((-1, -1));
@@ -760,6 +782,8 @@ impl<T: Task + 'static> AdsWrap<T> {
             &config.aes_keys,
             config.task_chan_size,
             config.prefetcher_thread_count,
+            config.topology.shard_count,
+            config.topology.workers_per_shard,
             #[cfg(feature = "directio")]
             config.uring_count,
             #[cfg(feature = "directio")]
@@ -780,6 +804,8 @@ impl<T: Task + 'static> AdsWrap<T> {
         aes_keys: &Option<[u8; 96]>,
         task_chan_size: usize,
         prefetcher_thread_count: usize,
+        shard_count: usize,
+        workers_per_shard: usize,
         #[cfg(feature = "directio")] uring_count: usize,
         #[cfg(feature = "directio")] uring_size: u32,
         #[cfg(feature = "directio")] sub_id_chan_size: usize,
@@ -792,6 +818,8 @@ impl<T: Task + 'static> AdsWrap<T> {
             file_segment_size,
             with_twig_file,
             aes_keys,
+            shard_count,
+            workers_per_shard,
         );
         ads.start_threads(
             flusher,

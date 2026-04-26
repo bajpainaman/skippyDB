@@ -88,7 +88,7 @@ impl<'a> Entry<'a> {
     }
 }
 
-pub fn sentry_entry(shard_id: usize, sn: u64, bz: &mut [u8]) -> EntryBz {
+pub fn sentry_entry(shard_id: usize, sn: u64, bz: &mut [u8]) -> EntryBz<'_> {
     if shard_id >= SHARD_COUNT || (sn as usize) >= (1 << 16) / SHARD_COUNT {
         panic!("SentryEntry Overflow");
     }
@@ -113,7 +113,7 @@ pub fn sentry_entry(shard_id: usize, sn: u64, bz: &mut [u8]) -> EntryBz {
     EntryBz { bz: &bz[..i] }
 }
 
-pub fn null_entry(bz: &mut [u8]) -> EntryBz {
+pub fn null_entry(bz: &mut [u8]) -> EntryBz<'_> {
     let next_key_hash: [u8; 32] = [0; 32];
     let e = Entry {
         key: &[] as &[u8],
@@ -363,7 +363,7 @@ impl EntryVec {
         self.pos_list[shard_id].len() - 1
     }
 
-    fn get_entry_by_pos(&self, pos: usize) -> EntryBz {
+    fn get_entry_by_pos(&self, pos: usize) -> EntryBz<'_> {
         let idx = pos / BIG_BUF_SIZE;
         let offset = pos % BIG_BUF_SIZE;
         let buf = self.buf_list.get(idx).unwrap();
@@ -373,7 +373,7 @@ impl EntryVec {
         }
     }
 
-    pub fn get_entry(&self, shard_id: usize, i: usize) -> EntryBz {
+    pub fn get_entry(&self, shard_id: usize, i: usize) -> EntryBz<'_> {
         self.get_entry_by_pos(self.pos_list[shard_id][i])
     }
 

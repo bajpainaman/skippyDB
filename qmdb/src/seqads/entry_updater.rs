@@ -56,7 +56,7 @@ impl UpdateBuffer {
         pos
     }
 
-    pub fn get_all_entry_bz(&self) -> Vec<EntryBz> {
+    pub fn get_all_entry_bz(&self) -> Vec<EntryBz<'_>> {
         let mut res = vec![];
         let mut keys = self
             .entry_map
@@ -347,7 +347,7 @@ impl EntryUpdater {
         }
     }
 
-    pub fn get_all_entry_bz(&self) -> Vec<EntryBz> {
+    pub fn get_all_entry_bz(&self) -> Vec<EntryBz<'_>> {
         self.update_buffer.get_all_entry_bz()
     }
 

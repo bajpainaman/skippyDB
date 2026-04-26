@@ -1,12 +1,12 @@
 use byteorder::{ByteOrder, LittleEndian};
-use kyumdb::def::{
+use skippydb::def::{
     calc_max_level, DEFAULT_ENTRY_SIZE, ENTRY_BASE_LENGTH, FIRST_LEVEL_ABOVE_TWIG,
     LEAF_COUNT_IN_TWIG, MAX_UPPER_LEVEL, TWIG_MASK, TWIG_SHARD_COUNT,
 };
-use kyumdb::entryfile::{entry, EntryBz};
-use kyumdb::merkletree::{check, helpers::build_test_tree, recover, tree, twig, Tree};
-use kyumdb::test_helper::TempDir;
-use kyumdb::utils::hasher::{self, Hash32, ZERO_HASH32};
+use skippydb::entryfile::{entry, EntryBz};
+use skippydb::merkletree::{check, helpers::build_test_tree, recover, tree, twig, Tree};
+use skippydb::test_helper::TempDir;
+use skippydb::utils::hasher::{self, Hash32, ZERO_HASH32};
 use serial_test::serial;
 
 #[test]

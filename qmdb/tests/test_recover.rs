@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use kyumdb::def::{DEFAULT_FILE_SIZE, SMALL_BUFFER_SIZE};
-use kyumdb::test_helper::TempDir;
-use kyumdb::{
+use skippydb::def::{DEFAULT_FILE_SIZE, SMALL_BUFFER_SIZE};
+use skippydb::test_helper::TempDir;
+use skippydb::{
     def::{MAX_UPPER_LEVEL, NODE_SHARD_COUNT, TWIG_MASK, TWIG_SHARD_COUNT},
     merkletree::{
         helpers::build_test_tree,

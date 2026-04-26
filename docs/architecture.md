@@ -1,6 +1,6 @@
-# KyumDB Internal Architecture
+# SkippyDB Internal Architecture
 
-This document covers the internal architecture of KyumDB — the data structures, pipeline stages, file formats, threading model, and recovery process.
+This document covers the internal architecture of SkippyDB — the data structures, pipeline stages, file formats, threading model, and recovery process.
 
 For the high-level concepts and usage guide, see the [README](../README.md).
 For GPU acceleration details, see [gpu-acceleration.md](gpu-acceleration.md).
@@ -549,7 +549,7 @@ pub struct ProofPath {
 
 **File**: [`qmdb/src/merkletree/recover.rs`](../qmdb/src/merkletree/recover.rs)
 
-On restart, KyumDB rebuilds volatile state from MetaDB + SSD files:
+On restart, SkippyDB rebuilds volatile state from MetaDB + SSD files:
 
 1. **Read MetaDB**: Get heights, file sizes, edge nodes, serial numbers
 2. **Truncate files**: If files are larger than MetaDB records (partial block), truncate to consistent state

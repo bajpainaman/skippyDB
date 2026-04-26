@@ -1,5 +1,5 @@
-use kyumdb::def::{ENTRY_BASE_LENGTH, NULL_ENTRY_VERSION, SHARD_COUNT};
-use kyumdb::entryfile::entry;
+use skippydb::def::{ENTRY_BASE_LENGTH, NULL_ENTRY_VERSION, SHARD_COUNT};
+use skippydb::entryfile::entry;
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -25,7 +25,7 @@ fn test_entry() {
     #[cfg(not(feature = "tee_cipher"))]
     let size = sentry_entry.bz.len() - 3; //exclude padding bytes
     #[cfg(feature = "tee_cipher")]
-    let size = sentry_entry.bz.len() - kyumdb::def::TAG_SIZE - 3; //exclude padding bytes
+    let size = sentry_entry.bz.len() - skippydb::def::TAG_SIZE - 3; //exclude padding bytes
     let x: [u8; 32] = Sha256::digest(&sentry_entry.bz[..size]).into();
     assert_eq!(x, sentry_entry.hash());
     assert_eq!(0, sentry_entry.version());
@@ -43,7 +43,7 @@ fn test_entry() {
     #[cfg(not(feature = "tee_cipher"))]
     let size = null_entry.bz.len() - 3; //exclude padding bytes
     #[cfg(feature = "tee_cipher")]
-    let size = null_entry.bz.len() - kyumdb::def::TAG_SIZE - 3; //exclude padding bytes
+    let size = null_entry.bz.len() - skippydb::def::TAG_SIZE - 3; //exclude padding bytes
     let x: [u8; 32] = Sha256::digest(&null_entry.bz[..size]).into();
     assert_eq!(x, null_entry.hash());
     assert_eq!(NULL_ENTRY_VERSION, null_entry.version());

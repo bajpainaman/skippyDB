@@ -56,7 +56,8 @@ struct AsyncGpuBuffers {
 /// Callers can do CPU work between dispatching and collecting results.
 /// Dropping without calling `wait()` will synchronize implicitly.
 pub struct GpuPending<'a> {
-    device: &'a Arc<CudaDevice>,
+    // Held only for the lifetime guarantee — kernel uses `stream` directly.
+    _device: &'a Arc<CudaDevice>,
     stream: &'a CudaStream,
     async_bufs: &'a AsyncGpuBuffers,
     count: usize,
@@ -918,7 +919,7 @@ impl GpuHasher {
         }
 
         GpuPending {
-            device: &self.device,
+            _device: &self.device,
             stream: &self.async_stream,
             async_bufs: &self.async_bufs,
             count: n,

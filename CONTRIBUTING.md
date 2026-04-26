@@ -1,6 +1,6 @@
-# Contributing to KyumDB
+# Contributing to SkippyDB
 
-Thank you for your interest in contributing to KyumDB! This guide covers everything you need to get started.
+Thank you for your interest in contributing to SkippyDB! This guide covers everything you need to get started.
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@ Thank you for your interest in contributing to KyumDB! This guide covers everyth
 
 External contributors are encouraged to submit issues and pull requests. That being said, not all issues will be addressed nor pull requests merged (even if well-intentioned).
 
-KyumDB provides reliable and high-performance verifiable database storage. Contributions that do not advance these goals may not be accepted. This could include (but is not limited to) replacing code with external dependencies, implementing optional functionality, and/or introducing algorithms that substantially increase complexity for marginal performance improvements.
+SkippyDB provides reliable and high-performance verifiable database storage. Contributions that do not advance these goals may not be accepted. This could include (but is not limited to) replacing code with external dependencies, implementing optional functionality, and/or introducing algorithms that substantially increase complexity for marginal performance improvements.
 
 **Almost always welcome:**
 - Bug fixes with regression tests
@@ -95,7 +95,7 @@ cargo run --release --bin speed -- --entry-count 4000000
 ## Project Layout
 
 ```
-kyumdb/
+skippydb/
 ├── qmdb/               # Core library (the main crate)
 │   ├── src/
 │   │   ├── lib.rs       # AdsCore, AdsWrap, ADS trait — entry point
@@ -331,5 +331,5 @@ You agree that any work submitted to this repository shall be dual-licensed unde
 
 ## Support
 
-- **Bug reports**: [GitHub Issues](https://github.com/bajpainaman/kyumdb/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/bajpainaman/kyumdb/discussions)
+- **Bug reports**: [GitHub Issues](https://github.com/bajpainaman/SkippyDB/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/bajpainaman/SkippyDB/discussions)
