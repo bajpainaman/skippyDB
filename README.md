@@ -1,206 +1,146 @@
-# SkippyDB: Skippy the Magnificent, or simply Skippy, is an advanced artificial intelligence created by the Elders millions of years prior to the beginning.
+# SkippyDB
+
+A GPU-accelerated, append-only Merkle key-value store for blockchain state. Targets multi-million-ops/s sustained throughput on a single host with verifiable read/write proofs and ~1× SSD write amplification.
 
 ![Build Status](https://github.com/bajpainaman/SkippyDB/actions/workflows/build.yml/badge.svg)
 ![Tests](https://github.com/bajpainaman/SkippyDB/actions/workflows/tests.yml/badge.svg)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
-A high-performance, verifiable key-value store optimized for blockchain state storage. SkippyDB uses an append-only Twig Merkle Tree design to minimize SSD write amplification, perform in-memory Merkleization with minimal DRAM, and provide cryptographic proofs for inclusion, exclusion, and historical states.
-
-> **Paper**: [QMDB: Quick Merkle Database](https://arxiv.org/pdf/2501.05262)
+> Forked from QMDB ([paper](https://arxiv.org/pdf/2501.05262)). The `skippydb`
+> crate name is the only public-API rename; on-disk format and most internal
+> module structure remain compatible with QMDB's design. Phase 2 of this
+> repository's moonshot rewrite introduced a `MetaInfoV2` envelope — see
+> [On-Disk Format](#on-disk-format) before pointing this at a pre-fork DB.
 
 ---
 
-## Table of Contents
+## Headline numbers
 
-- [Why SkippyDB?](#why-SkippyDB)
-- [Features](#features)
-- [Architecture Overview](#architecture-overview)
-- [Quick Start](#quick-start)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-  - [Your First Database](#your-first-database)
-- [Core Concepts](#core-concepts)
-  - [Entries](#entries)
-  - [Twigs](#twigs)
-  - [The Twig Merkle Tree](#the-twig-merkle-tree)
-  - [Sharding](#sharding)
-  - [The Pipeline](#the-pipeline)
-- [Usage Guide](#usage-guide)
-  - [Configuration](#configuration)
-  - [Creating a Database](#creating-a-database)
-  - [Writing Data (Create/Update/Delete)](#writing-data-createupdatedelete)
-  - [Reading Data](#reading-data)
-  - [Generating Proofs](#generating-proofs)
-  - [Block Lifecycle](#block-lifecycle)
-- [GPU Acceleration (CUDA)](#gpu-acceleration-cuda)
-- [Performance](#performance)
-- [Directory Structure](#directory-structure)
-- [Examples](#examples)
-- [Benchmarking](#benchmarking)
-- [Contributing](#contributing)
-- [License](#license)
-- [Citation](#citation)
+Measured on `skippy-dev` (AMD Ryzen 9 5900X · NVIDIA RTX 4080 SUPER · 46 GB
+RAM · ext4 on a single NVMe Gen4 SSD), 40-million-entry cuda bench, no env
+flags, raw JSON in `bench/results/perlevel-default-40m.json`:
+
+| metric | value |
+|---|---:|
+| Sequential updates | **1.35M ops/s** |
+| Random reads | **1.60M ops/s** |
+| Inserts | **1.12M ops/s** |
+| End-to-end transactions | **47.5K txns/s** |
+| Block population | **11.1 blocks/s** (100K ops/block) |
+| Wall-clock for the whole 40M bench | **49.5 s** |
+| Proof generation | <1 ms |
+| Write amplification | ~1.0× |
+
+That's **~4.3× the throughput of `main`** and **~3.6× the throughput of the
+prior moonshot baseline** at the same workload. See
+[`bench/results/`](bench/results/) for every interim run and the
+[A/B comparisons](#performance-history) below for the path that got there.
+
+Reproduce:
+
+```bash
+head -c 10M </dev/urandom > randsrc.dat
+cargo run --release --features cuda --bin speed -- --entry-count 40000000
+```
 
 ---
 
 ## Why SkippyDB?
 
-Traditional databases suffer from write amplification on SSDs when maintaining authenticated data structures. SkippyDB solves this with:
-
-| Problem | SkippyDB's Solution |
+| Problem | SkippyDB |
 |---|---|
-| High SSD write amplification | Append-only twig design — no in-place updates |
-| Expensive in-memory Merkle trees | Only upper tree levels in DRAM; twigs on SSD |
-| Slow state proofs | O(1) I/O per update; single SSD read per access |
-| Poor hardware utilization | Pipelined architecture with parallel SHA256 hashing |
-| GPU-unfriendly hashing | Optional CUDA-accelerated batch SHA256 kernels |
+| SSD write amplification on authenticated stores | Append-only twig design — entries and twigs are never modified in place |
+| Expensive in-memory Merkle trees | Only the upper-tree levels live in DRAM; each twig (2048 entries) ships to SSD once finalized |
+| Slow state proofs | O(1) I/O per update; one SSD read per access; <1ms inclusion / exclusion / historical proofs |
+| Single-threaded hashing | 16-shard parallel pipeline + GPU-batched SHA256 (AoS, SoA, warp-cooperative variants) |
+| Thread-pool backpressure | Lock-free `EntryBuffer` between updater and flusher; per-block `AtomicUsize` countdown commit |
 
-**Benchmarks**: 6x faster than RocksDB, 8x faster than state-of-the-art verifiable databases. Validated on datasets up to 15 billion entries.
-
----
-
-## Features
-
-- **SSD-Optimized Append-Only Design** — Entries and twigs are only appended, never modified in-place. Head-prunable files enable efficient garbage collection.
-- **In-Memory Merkleization** — Only the upper levels of the Merkle tree live in DRAM. Each twig (2048 entries) is flushed to SSD once finalized.
-- **O(1) I/O Per Update** — Writing a new entry requires appending to the entry file. No random writes.
-- **Inclusion & Exclusion Proofs** — Prove that a key exists, doesn't exist, or hasn't changed since a given block height.
-- **16-Shard Parallelism** — Data is sharded by key hash for concurrent processing across the pipeline.
-- **Compaction** — Background compaction keeps storage utilization healthy by replaying old active entries.
-- **GPU Acceleration** — Optional CUDA kernels for batch SHA256 hashing (AoS, SoA, warp-cooperative, variable-length).
-- **Encryption Support** — Optional AES-256-GCM encryption for entries and index data (`tee_cipher` feature).
-- **Direct I/O** — Optional `io_uring`-based direct I/O for bypassing the OS page cache on Linux.
+Validated correctness via deterministic byte-level parity tests across the
+CPU and GPU code paths
+([`qmdb/tests/sync_upper_nodes_parity.rs`](qmdb/tests/sync_upper_nodes_parity.rs),
+[`active_bits_sync_parity.rs`](qmdb/tests/active_bits_sync_parity.rs),
+[`twig_sync_parity.rs`](qmdb/tests/twig_sync_parity.rs),
+[`cpu_gpu_sha256_parity.rs`](qmdb/tests/cpu_gpu_sha256_parity.rs)). Every
+sync-upper-nodes change has to clear those gates before merging.
 
 ---
 
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Client / EVM                             │
-│                   (sends blocks of tasks)                       │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ tasks
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     SkippyDB Pipeline                              │
-│                                                                  │
-│  ┌────────────┐    ┌────────────┐    ┌────────────────────────┐  │
-│  │ Prefetcher │───▶│  Updater   │───▶│       Flusher          │  │
-│  │            │    │            │    │                        │  │
-│  │ Pre-reads  │    │ Updates    │    │ Job1: Append entries   │  │
-│  │ entries    │    │ B-tree     │    │ Job2: Clear ActiveBits │  │
-│  │ into cache │    │ index +   │    │ Job3: Sync twig roots  │  │
-│  │ for D/C    │    │ sends to  │    │ Job4: Evict twigs      │  │
-│  │ operations │    │ flusher   │    │ Job5: Flush to SSD     │  │
-│  └────────────┘    │ via       │    │ Job6: Sync upper tree  │  │
-│                    │ EntryBuf  │    │ Job7: Prune old twigs  │  │
-│                    └────────────┘    │ Job8: Update MetaDB    │  │
-│                                      └────────────────────────┘  │
-│                                                                  │
-│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │ Indexer │  │EntryFile │  │ TwigFile │  │     MetaDB       │  │
-│  │ (B-tree)│  │ (HPFile) │  │ (HPFile) │  │ (custom 2-file   │  │
-│  │         │  │          │  │          │  │  ping-pong)      │  │
-│  └─────────┘  └──────────┘  └──────────┘  └──────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-See [docs/architecture.md](docs/architecture.md) for the full deep-dive.
-
----
-
-## Quick Start
+## Quick start
 
 ### Prerequisites
 
-- **Rust** 1.75+ (edition 2021)
-- **Linux** (required for `io_uring` / direct I/O features; macOS works for basic usage)
-- **System packages** (Ubuntu/Debian):
-
 ```bash
+# Ubuntu / Debian
 sudo apt-get install -y g++ linux-libc-dev libclang-dev unzip libjemalloc-dev make
-```
-
-Or use the included script:
-
-```bash
+# Or:
 ./install-prereqs-ubuntu.sh
 ```
 
-**Optional** (for GPU acceleration):
-- NVIDIA GPU with compute capability 6.0+
-- CUDA Toolkit 12.0+
-- `nvcc` on PATH
+- Rust 1.75+ (edition 2021)
+- Linux for `io_uring` / direct I/O features (macOS works for the basic API)
+- For CUDA: NVIDIA GPU compute capability 6.0+, CUDA Toolkit 12.0+, `nvcc` on PATH
 
-### Installation
+### Build
 
 ```bash
 git clone https://github.com/bajpainaman/SkippyDB.git
 cd SkippyDB
-cargo build --release
+cargo build --release                  # CPU-only
+cargo build --release --features cuda  # with GPU SHA256 kernels
 ```
 
-With GPU acceleration:
-
-```bash
-cargo build --release --features cuda
-```
-
-### Your First Database
+### Hello, SkippyDB
 
 ```rust
-use qmdb::config::Config;
-use qmdb::def::{IN_BLOCK_IDX_BITS, OP_CREATE};
-use qmdb::tasks::TasksManager;
-use qmdb::utils::changeset::ChangeSet;
-use qmdb::utils::hasher;
-use qmdb::utils::byte0_to_shard_id;
-use qmdb::{AdsCore, AdsWrap, ADS};
+use skippydb::config::Config;
+use skippydb::def::{IN_BLOCK_IDX_BITS, OP_CREATE};
+use skippydb::tasks::TasksManager;
+use skippydb::test_helper::SimpleTask;
+use skippydb::utils::byte0_to_shard_id;
+use skippydb::utils::changeset::ChangeSet;
+use skippydb::utils::hasher;
+use skippydb::{AdsCore, AdsWrap};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 fn main() {
-    // 1. Initialize the database directory
     let config = Config::from_dir("my_database");
     AdsCore::init_dir(&config);
+    let mut ads = AdsWrap::<SimpleTask>::new(&config);
 
-    // 2. Open the database
-    let mut ads = AdsWrap::new(&config);
-
-    // 3. Build a changeset with create operations
-    let mut cset = ChangeSet::new();
+    // Build a CREATE op for ("hello", "world")
     let key = b"hello";
     let value = b"world";
     let key_hash = hasher::hash(key);
     let shard_id = byte0_to_shard_id(key_hash[0]) as u8;
+
+    let mut cset = ChangeSet::new();
     cset.add_op(OP_CREATE, shard_id, &key_hash, key, value, None);
     cset.sort();
 
-    // 4. Wrap it in a task and submit to block height=1
-    let task = SimpleTask::new(vec![cset]);
+    // Submit as a single-task block at height 1
     let height: i64 = 1;
     let task_id = height << IN_BLOCK_IDX_BITS;
-    ads.start_block(height, Arc::new(TasksManager::new(
-        vec![RwLock::new(Some(task))], task_id,
-    )));
+    let task = SimpleTask::new(vec![cset]);
+    ads.start_block(
+        height,
+        Arc::new(TasksManager::new(vec![RwLock::new(Some(task))], task_id)),
+    );
 
     let shared = ads.get_shared();
     shared.insert_extra_data(height, String::new());
     shared.add_task(task_id);
-
-    // 5. Flush and read back
     ads.flush();
 
+    // Read it back
     let mut buf = [0u8; 300];
-    let shared = ads.get_shared();
     let (size, found) = shared.read_entry(-1, &key_hash, &[], &mut buf);
     assert!(found);
-    println!("Read {} bytes", size);
+    println!("Read {} bytes back", size);
 }
 ```
 
-Run the included demo:
+Or just run the bundled example:
 
 ```bash
 cargo run --example v2_demo
@@ -208,508 +148,396 @@ cargo run --example v2_demo
 
 ---
 
-## Core Concepts
-
-### Entries
-
-An **Entry** is the atomic unit of data in SkippyDB. Each entry represents a single key-value pair at a specific block height.
+## Architecture (one diagram)
 
 ```
-Entry := (Key, Value, NextKeyHash, Height, SerialNumber, DeactivatedSNList)
+                 client / EVM submits blocks of tasks
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                         SkippyDB pipeline                          │
+│                                                                    │
+│    Prefetcher  ──▶  Updater  ──▶  Flusher                          │
+│    (warms        (B-tree         (8 jobs per block: append +       │
+│     cache         indexer +       deactivate + sync twig roots +   │
+│     for D/C)      EntryBuf)       evict + flush + sync upper +     │
+│                                   prune + commit MetaDB)           │
+│                                                                    │
+│    16-shard parallelism on every stage; per-shard updater + tree.  │
+│                                                                    │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────────┐   │
+│  │ Indexer  │ │EntryFile │ │ TwigFile │ │       MetaDB         │   │
+│  │ (B-tree, │ │ (HPFile, │ │ (HPFile) │ │ (custom 2-file       │   │
+│  │  in-mem  │ │  append- │ │          │ │  ping-pong, V2       │   │
+│  │  or SSD) │ │  only)   │ │          │ │  envelope)           │   │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────────────────┘   │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-**Binary layout** (see [`qmdb/src/entryfile/entry.rs`](qmdb/src/entryfile/entry.rs)):
+### Key pieces
 
-```
-┌──────────┬────────────┬───────────────┬─────┬───────┬──────────────┐
-│ 1B KeyLen│ 3B ValueLen│ 1B DSN Count  │ Key │ Value │ NextKeyHash  │
-├──────────┴────────────┴───────────────┴─────┴───────┤  (32 bytes)  │
-│                                                      ├──────────────┤
-│                                                      │ 8B Version   │
-│                                                      ├──────────────┤
-│                                                      │ 8B SerialNum │
-│                                                      ├──────────────┤
-│                                                      │ DSN List     │
-│                                                      │ (N × 8B)     │
-│                                                      ├──────────────┤
-│                                                      │ Padding (→8B)│
-└──────────────────────────────────────────────────────┴──────────────┘
-```
+- **Twig**: 2048-entry Merkle sub-tree. Lower 11 levels = entry hashes; upper 3 levels = ActiveBits. Once a twig fills, it's serialized to SSD and only the twig-root hash stays in DRAM. ~64 bytes DRAM per twig regardless of entry size.
+- **Upper tree**: in-DRAM Merkle nodes connecting twig roots to the global root. Computed on GPU by default (`sync_upper_nodes_gpu`, per-level kernel launches). Resident-store path (`sync_upper_nodes_gpu_resident`) is opt-in (see [Env toggles](#env-toggles)).
+- **EntryBuffer**: lock-free ring buffer feeding entries from updater to flusher. Per-block `AtomicUsize` countdown picks the last shard to commit MetaDB — no shard-0 hardcode, no double-barrier dance.
+- **Sharding**: `shard_id = first_byte_of(SHA256(key)) >> 4` → 16 shards. Each gets its own entry file, twig file, indexer slice, updater thread, compactor.
+- **Pipeline depth = 2**: block N+2 is allowed to start prefetching while block N is mid-flush. Empirically depth>2 regresses on this hardware tier (see `TODO.md`).
 
-- **NextKeyHash**: Links entries in sorted key-hash order. Enables exclusion proofs ("no key exists between A and B").
-- **DeactivatedSNList**: When this entry is created, it lists which older entries are being replaced (deactivated).
-- **ActiveBit**: Each entry has an associated bit. `1` = current, `0` = superseded. Stored separately in the twig.
-
-### Twigs
-
-A **Twig** groups 2048 consecutive entries (by serial number) into a compact Merkle sub-tree.
-
-```
-              TwigRoot (Level 12)
-             /                  \
-        LeftRoot              ActiveBitsMTL3 (Level 11)
-       /                      /            \
-   11-level tree         ActiveBitsMTL2    ActiveBitsMTL2
-   (2048 leaves =        /       \          /        \
-    entry hashes)    ABits_L1  ABits_L1  ABits_L1  ABits_L1
-                     (8 × 32B ActiveBit pages)
-```
-
-- **Left sub-tree**: 11-level Merkle tree over the 2048 entry hashes. Stored on SSD once finalized.
-- **Right sub-tree**: 3-level Merkle tree over the 256 bytes of ActiveBits. Kept in DRAM for active twigs.
-- **Youngest twig**: The most recent, not-yet-full twig. Its left sub-tree lives in DRAM.
-
-### The Twig Merkle Tree
-
-The full tree has two layers:
-
-1. **Lower layer** (twigs): Each twig is a self-contained sub-tree on SSD.
-2. **Upper layer**: In-DRAM nodes connecting twig roots up to the global root.
-
-This design means only ~64 bytes of DRAM per twig (the twig root hash), regardless of how many entries it contains.
-
-### Sharding
-
-SkippyDB divides keyspace into **16 shards** based on the first byte of `SHA256(key)`:
-
-```
-shard_id = key_hash[0] * 256 / SHARD_DIV    // SHARD_DIV = 4096
-```
-
-Each shard has its own:
-- Entry file (HPFile)
-- Twig file (HPFile)
-- Merkle tree
-- Updater thread
-- Compactor
-
-Shards are processed in parallel via `rayon`.
-
-### The Pipeline
-
-SkippyDB processes blocks through a 3-stage pipeline:
-
-```
-Block N:     [Prefetch] ──▶ [Update] ──▶ [Flush (Jobs 1-5)]
-                                              │
-Block N+1:   [Prefetch] ──▶ [Update]          │──▶ [Flush (Jobs 6-8)]
-                                              │
-Block N+2:   [Prefetch]                       │
-```
-
-The pipeline allows up to 2 blocks in flight. A block's data is guaranteed to be on SSD before the block 2 heights later starts executing.
+The deep dive lives at [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
-## Usage Guide
+## Core concepts
 
-### Configuration
+### Entry layout (`qmdb/src/entryfile/entry.rs`)
+
+```
+┌──────────┬────────────┬──────────────┬──────┬───────┬──────────────┐
+│ 1B KeyLen│ 3B ValueLen│ 1B DSN Count │ Key  │ Value │ NextKeyHash  │
+└──────────┴────────────┴──────────────┴──────┴───────┤  (32 bytes)  │
+                                                     ├──────────────┤
+                                                     │ 8B Version   │
+                                                     ├──────────────┤
+                                                     │ 8B SerialNum │
+                                                     ├──────────────┤
+                                                     │ DSN List     │
+                                                     │ (N × 8B)     │
+                                                     ├──────────────┤
+                                                     │ Padding (→8B)│
+                                                     └──────────────┘
+```
+
+- `NextKeyHash` links entries in sorted key-hash order — enables exclusion proofs ("no key exists between A and B").
+- `DeactivatedSNList` lists older entries this entry replaces.
+- `ActiveBit` (one bit per SN, stored separately in the twig) tracks live/superseded.
+
+### Operations
+
+| op | constant | semantics |
+|---|---:|---|
+| `OP_READ` | 1 | Read, no mutation. Used for cache warming + debug. |
+| `OP_WRITE` | 2 | Update an existing key (deactivate old SN, append new entry). |
+| `OP_CREATE` | 3 | Insert a brand-new key. |
+| `OP_DELETE` | 4 | Delete an existing key. |
+
+Group ops into a `ChangeSet`, sort it, wrap in a `Task`, submit at a block height. See [`Hello, SkippyDB`](#hello-skippydb) above.
+
+### Reading
 
 ```rust
-use qmdb::config::Config;
+let mut buf = [0u8; skippydb::def::DEFAULT_ENTRY_SIZE];
+let (size, found) = shared.read_entry(
+    -1,         // height: -1 = latest committed; N = state at height N
+    &key_hash,
+    &[],        // optional key bytes for collision check; pass &[] to skip
+    &mut buf,
+);
+if found {
+    let entry = skippydb::entryfile::EntryBz { bz: &buf[..size] };
+    let value = entry.value();
+    // ...
+}
+```
+
+### Proofs
+
+Set `with_twig_file: true` in the config first.
+
+```rust
+let proof = ads.get_proof(shard_id, serial_number)?;
+proof.check(false)?;          // verify
+let bytes = proof.to_bytes(); // serialize for transmission
+```
+
+A `ProofPath` carries: 11 sibling hashes for the twig's left sub-tree, 3 for the active-bits sub-tree, and the upper-tree path from the twig root to the global root.
+
+---
+
+## Configuration
+
+```rust
+use skippydb::config::Config;
 
 let config = Config {
-    dir: "my_db".to_string(),
-    wrbuf_size: 8 * 1024 * 1024,           // 8 MB write buffer
-    file_segment_size: 1024 * 1024 * 1024,  // 1 GB HPFile segments
-    with_twig_file: false,                  // set true for proof generation
-    compact_thres: 20_000_000,              // compaction threshold
-    utilization_ratio: 7,                   // compact when utilization < 70%
+    dir: "my_db".into(),
+    wrbuf_size: 8 * 1024 * 1024,            // 8 MB write buffer per HPFile
+    file_segment_size: 1024 * 1024 * 1024,  // 1 GB segments
+    with_twig_file: false,                  // true → enables proof generation
+    compact_thres: 20_000_000,              // entries before compaction triggers
+    utilization_ratio: 7,                   // compact when active/total < 7/10
     utilization_div: 10,
     task_chan_size: 200_000,
     prefetcher_thread_count: 512,
-    aes_keys: None,                         // set for encryption
+    aes_keys: None,                         // 96-byte AES-256-GCM keys (3 × 32B)
     ..Config::default()
 };
 ```
 
-Key configuration knobs:
-
-| Field | Default | Description |
+| Field | Default | Notes |
 |---|---|---|
-| `dir` | `"default"` | Root directory for all data files |
-| `wrbuf_size` | `8 MB` | Write buffer size per HPFile |
-| `file_segment_size` | `1 GB` | Size of each HPFile segment on disk |
-| `with_twig_file` | `false` | Enable twig file for proof generation |
-| `compact_thres` | `20,000,000` | Minimum entries before compaction triggers |
-| `utilization_ratio/div` | `7/10` | Compact when active/total < ratio/div |
-| `task_chan_size` | `200,000` | Channel buffer for task pipeline |
-| `aes_keys` | `None` | 96-byte AES keys for encryption (3 × 32B) |
-
-### Creating a Database
-
-```rust
-use qmdb::config::Config;
-use qmdb::AdsCore;
-
-let config = Config::from_dir("my_db");
-
-// Initialize directory structure with sentry entries
-AdsCore::init_dir(&config);
-```
-
-This creates:
-```
-my_db/
-├── data/
-│   ├── entries0..entries15   (16 entry files, one per shard)
-│   └── twig0..twig15         (16 twig files, if with_twig_file=true)
-├── metadb/                   (custom two-file ping-pong store)
-└── idx/                      (B-tree indexer data)
-```
-
-### Writing Data (Create/Update/Delete)
-
-All mutations go through **ChangeSets** grouped into **Tasks**, submitted as **Blocks**:
-
-```rust
-use qmdb::def::{OP_CREATE, OP_WRITE, OP_DELETE, IN_BLOCK_IDX_BITS};
-use qmdb::utils::changeset::ChangeSet;
-use qmdb::utils::{hasher, byte0_to_shard_id};
-
-// Build a changeset
-let mut cset = ChangeSet::new();
-
-// CREATE: insert a new key-value pair
-let key = b"user:alice";
-let value = b"balance:100";
-let key_hash = hasher::hash(key);
-let shard_id = byte0_to_shard_id(key_hash[0]) as u8;
-cset.add_op(OP_CREATE, shard_id, &key_hash, key, value, None);
-
-// UPDATE: modify an existing key's value
-let new_value = b"balance:200";
-cset.add_op(OP_WRITE, shard_id, &key_hash, key, new_value, None);
-
-// DELETE: remove a key-value pair
-cset.add_op(OP_DELETE, shard_id, &key_hash, key, &[], None);
-
-// IMPORTANT: sort before submitting
-cset.sort();
-```
-
-**Operation types** (defined in [`qmdb/src/def.rs`](qmdb/src/def.rs)):
-
-| Constant | Value | Description |
-|---|---|---|
-| `OP_READ` | 1 | Read (no mutation) |
-| `OP_WRITE` | 2 | Update existing key |
-| `OP_CREATE` | 3 | Insert new key |
-| `OP_DELETE` | 4 | Delete existing key |
-
-### Reading Data
-
-```rust
-use qmdb::def::DEFAULT_ENTRY_SIZE;
-use qmdb::entryfile::EntryBz;
-
-let shared = ads.get_shared();
-let mut buf = [0u8; DEFAULT_ENTRY_SIZE];
-
-// Read by key hash (faster — no key comparison)
-let key_hash = hasher::hash(b"user:alice");
-let (size, found) = shared.read_entry(-1, &key_hash, &[], &mut buf);
-
-if found {
-    let entry = EntryBz { bz: &buf[..size] };
-    println!("Key:   {:?}", entry.key());
-    println!("Value: {:?}", entry.value());
-    println!("SN:    {}", entry.serial_number());
-    println!("Ver:   {}", entry.version());
-}
-
-// Read by key hash + key (verifies key match for hash collisions)
-let (size, found) = shared.read_entry(-1, &key_hash, b"user:alice", &mut buf);
-```
-
-The `height` parameter controls which block's state to query:
-- `-1`: Latest committed state
-- `N`: State as of block height N
-
-### Generating Proofs
-
-Enable `with_twig_file: true` in config, then:
-
-```rust
-// Get a Merkle proof for a specific entry
-let shard_id = 0;
-let serial_number = 42;
-
-match ads.get_proof(shard_id, serial_number) {
-    Ok(proof) => {
-        // Verify the proof
-        let mut proof_copy = proof;
-        proof_copy.check(false).expect("proof verification failed");
-
-        // Serialize for transmission
-        let bytes = proof_copy.to_bytes();
-        println!("Proof size: {} bytes", bytes.len());
-    }
-    Err(e) => eprintln!("Proof generation failed: {}", e),
-}
-```
-
-A `ProofPath` contains:
-- `left_of_twig`: 11 sibling hashes in the entry Merkle tree
-- `right_of_twig`: 3 sibling hashes in the ActiveBits tree
-- `upper_path`: Sibling hashes from twig root to global root
-- `serial_num`: The entry's serial number
-- `root`: The expected Merkle root
-
-### Block Lifecycle
-
-```rust
-// Height 1
-let height = 1i64;
-let task_id = height << IN_BLOCK_IDX_BITS;
-
-// Start a new block
-let (ok, prev_meta) = ads.start_block(
-    height,
-    Arc::new(TasksManager::new(task_list, task_id)),
-);
-
-// Get a shared handle for concurrent access
-let shared = ads.get_shared();
-
-// Attach extra data (e.g., block hash) to this block
-shared.insert_extra_data(height, "block_hash:0xabc".to_string());
-
-// Submit tasks one at a time (can be from different threads)
-for idx in 0..task_count {
-    shared.add_task((height << IN_BLOCK_IDX_BITS) | idx);
-}
-
-// Flush: blocks until pipeline catches up
-let meta_infos = ads.flush();
-```
+| `dir` | `"default"` | Data root (entries, twigs, MetaDB, idx all live here). |
+| `wrbuf_size` | `8 MB` | Per-HPFile write buffer. |
+| `file_segment_size` | `1 GB` | HPFile segment rotation. |
+| `with_twig_file` | `false` | Required for `get_proof`. |
+| `compact_thres` | `20,000,000` | Compaction starts above this entry count. |
+| `utilization_ratio / div` | `7 / 10` | Compact when liveness drops below the ratio. |
+| `task_chan_size` | `200,000` | Pipeline buffer. |
+| `aes_keys` | `None` | Set for `tee_cipher` encryption. |
+| `topology` | `Topology::default()` | Runtime shard count + workers-per-shard (Phase 2.3a). |
 
 ---
 
-## GPU Acceleration (CUDA)
+## GPU acceleration
 
-SkippyDB supports optional GPU-accelerated SHA256 batch hashing for Merkle tree operations. See [docs/gpu-acceleration.md](docs/gpu-acceleration.md) for the full guide.
+CUDA SHA256 kernels handle the upper-tree Merkle sync, twig sync, and active-bits sync. Path selection happens at runtime:
 
-### Quick Setup
-
-```bash
-# Build with CUDA support
-cargo build --release --features cuda
-
-# Run GPU tests (requires NVIDIA GPU)
-cargo test --features cuda -- gpu
-
-# Run benchmarks
-cargo bench --bench hash_benchmarks --features cuda
-```
-
-### Kernel Variants
-
-| Kernel | Layout | Use Case |
+| Path | When | Notes |
 |---|---|---|
-| `sha256_node_hash` | AoS (65B stride) | Default; simple fixed-size node hashing |
-| `sha256_node_hash_soa` | SoA (32B stride) | Better memory coalescing for high batch sizes |
-| `sha256_node_hash_warp_coop` | AoS + warp shuffles | 8 threads/hash; good on high-SM GPUs |
-| `sha256_variable_hash` | Variable-length | Entry hashing (50-300B inputs) |
+| `sync_upper_nodes_gpu` (per-level) | **default** | Sends a small `n_list` per level to GPU; produces byte-identical roots to CPU. ~4.5× faster than the resident path at 40M cuda. |
+| `sync_upper_nodes_gpu_resident` | `SKIPPY_USE_GPU_RESIDENT=1` | Keeps the entire upper tree in GPU-resident memory via `flash-map`. After the [`NULL_TWIG.twig_root` populate fix](#performance-history) it produces parity-equal roots, but the every-block bulk-populate of the active twig set dominates and slows the path down. Kept for benchmarking only. |
+| CPU SHA256 (SHA-NI) | small batches | `auto_batch_node_hash` falls back to CPU when n < 256 — Zen 3's hardware SHA-NI ties Blake3 at 65B inputs, so the round-trip cost beats the kernel launch at small sizes. |
 
-### Usage
+Kernel variants:
+
+| kernel | layout | use |
+|---|---|---|
+| `sha256_node_hash` | AoS (65B stride) | Default fixed-size node hashing |
+| `sha256_node_hash_soa` | SoA (32B stride) | Better coalesced reads at high batch sizes |
+| `sha256_node_hash_warp_coop` | AoS + warp shuffles | 8 threads/hash on high-SM GPUs |
+| `sha256_variable_hash` | Variable-length | Entry-content hashing (50–300 B inputs) |
+
+Direct API:
 
 ```rust
-use qmdb::gpu::{GpuHasher, NodeHashJob};
+use skippydb::gpu::{GpuHasher, NodeHashJob};
 
-let gpu = GpuHasher::new(200_000).expect("CUDA init failed");
+let gpu = GpuHasher::new(200_000)?;
 
-// Batch hash Merkle tree nodes
-let jobs: Vec<NodeHashJob> = vec![
+let jobs = vec![
     NodeHashJob { level: 0, left: [0x11; 32], right: [0xAB; 32] },
-    // ... thousands more
+    // ... batch as many as you like
 ];
-let hashes = gpu.batch_node_hash(&jobs);
+let parents = gpu.batch_node_hash(&jobs); // auto-dispatch CPU / AoS / SoA
 
-// SoA layout for better GPU memory throughput
-let levels = vec![0u8; 10000];
-let lefts = vec![[0x11u8; 32]; 10000];
-let rights = vec![[0xABu8; 32]; 10000];
-let hashes = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
+// Or pin to SoA explicitly:
+let levels = vec![0u8; 10_000];
+let lefts = vec![[0x11u8; 32]; 10_000];
+let rights = vec![[0xABu8; 32]; 10_000];
+let parents = gpu.batch_node_hash_soa(&levels, &lefts, &rights);
 ```
 
+Full guide: [`docs/gpu-acceleration.md`](docs/gpu-acceleration.md).
+
 ---
 
-## Performance
+## Env toggles
 
-Measured on `skippy-dev` (AMD Ryzen 9 5900X · RTX 4080 SUPER · 46 GB RAM ·
-ext4 on NVMe Gen4) at 40M-entry cuda bench, `bench/results/perlevel-default-40m.json`:
+All env vars read once at startup via `OnceLock`; setting them mid-run does nothing. Production deployments should leave these unset.
 
-| Metric | SkippyDB | Notes |
+| var | default | what |
 |---|---|---|
-| Sequential updates | **1.35M ops/s** | 40M-entry workload, GPU per-level Merkle |
-| Random reads | **1.60M ops/s** | Same workload, post-population |
-| Inserts | **1.12M ops/s** | Cold writes |
-| Transactions | **47.5K txns/s** | End-to-end TPS |
-| Block population | **11.1 blocks/s** | 100K ops/block |
-| Proof generation | <1ms | — |
-| Write amplification | ~1.0x | vs ~10-30x for RocksDB |
-
-Reproduce with `cargo run --release --features cuda --bin speed --
---entry-count 40000000`. See `bench/results/` for the JSON + the
-A/B comparison vs the prior GPU-resident path.
-
-GPU acceleration is on by default (`--features cuda`). Set
-`SKIPPY_USE_GPU_RESIDENT=1` to opt into the legacy resident-store path
-for benchmark comparison only — at the time of this writing it is
-~4.5× slower than the per-level default at 40M cuda due to per-block
-H→D bulk-populate of the active-twig set.
+| `SKIPPY_TRACE` | unset | Emit `TRACE shard=S height=H phase=P us=US` to stderr per flusher phase. Adds noticeable wall-clock from `eprintln!`; use the trace to read phase **shares**, not absolute times. |
+| `SKIPPY_USE_GPU_RESIDENT` | unset | Opt into the legacy GPU-resident upper-tree sync path. Off by default since 2026-04-26 — see [Performance history](#performance-history). |
+| `SKIPPY_WORKERS_PER_SHARD` | `1` | Runtime `Topology.workers_per_shard`. Values >1 enable the experimental Phase 2.4-v2 parallel indexer-read path; `W=1` is byte-identical to the prior production code. |
+| `SKIPPY_ROOT_DUMP` | unset | Stderr-dump every committed `(shard, height) → root_hash` for debugging parity issues. |
+| `SKIPPY_NO_GPU_RESIDENT` | unset | Legacy gate (pre-default-flip). Equivalent to leaving `SKIPPY_USE_GPU_RESIDENT` unset; kept so older scripts still work. |
 
 ---
 
-## Directory Structure
+## On-disk format
+
+The `MetaInfo` plaintext is prefixed with the 8-byte magic
+`META_MAGIC_V2 = b"SKIPV2\x00\x00"`. Pre-V2 databases (anything from
+QMDB or pre-Phase-2 SkippyDB) **cannot be loaded** — `MetaDB::reload_from_file`
+panics loudly with a pointer to TODO.md. `MetaDB::with_dir_checked`
+returns `MetaDbError::UnsupportedFormat` if a caller wants to surface the
+error cleanly instead.
+
+To bump the format again: change the last two bytes of `META_MAGIC_V2`,
+add a dispatch in `parse_metainfo_v2`, leave V2 green for a deprecation
+window. See `qmdb/src/metadb.rs`.
+
+The entry-file, twig-file, and indexer formats are unchanged from QMDB
+upstream.
+
+---
+
+## Performance history
+
+This repository tracks every optimization (and every regression) in
+`TODO.md` and `bench/results/`. Highlights:
+
+| phase | branch / commit | 40M cuda elapsed | block_pop | updates/s | note |
+|---|---|---:|---:|---:|---|
+| `main` baseline | upstream | 214.4 s | 2.27/s | 206K | Original QMDB-derived. |
+| Phase 1 (async commit + countdown) | merged → moonshot | ~199 s | 2.43/s | 224K | +6.9% block_pop, +9.2% updates. |
+| Phase 2 (`MetaInfoV2` + Box<[T]> per-shard) | merged → moonshot | 178.5 s | 2.81/s | 247K | +20% across the board, reproducible. |
+| Phase 2.4-v2 W=1 fast-path | `9d077de` | (parity-only) | — | — | W>1 has a known channel-cascade panic, opt-in only. |
+| Phase 0 second-capture | `55b9e1c` | — | — | — | Sub-trace `entry_append`; surfaced that `sync_upper_nodes` was 62% of block time, not `entry_append`. |
+| `NULL_TWIG.twig_root` parity fix | `eb4659e` | — | — | — | Resident-path GPU `bulk_get_device` was returning uninitialized memory for missing twig positions. Fixed; locked behind unit-level parity test. |
+| **Per-level GPU is the default** | `1916aaa` | **49.5 s** | **11.10/s** | **1.35M** | ~4.3× over `main`, ~3.6× over Phase 2. |
+
+The full A/B numbers (resident vs per-level, 5M and 40M, pre-fix and
+post-fix) are in `bench/results/`.
+
+### Failed probes (kept for the record)
+
+- **Phase 4 — Blake3 swap (CPU only)**: -13.9% at 40M. Zen 3 SHA-NI ties Blake3 at 65B inputs; force-CPU disabled the SoA GPU kernel that was carrying upper-tree sync.
+- **Phase 4 — Blake3 swap (CUDA kernel)**: -15.8% at 40M. Kernel is parity-verified (`qmdb/tests/blake3_kernel_parity.rs`), but had to drop the fused `batch_active_bits_fused` SHA256 kernel to keep tree algorithmically consistent. Net regression. Kernel is parked at `qmdb/src/gpu/blake3_kernel.cu` on the `rewrite/phase4-blake3-cuda` branch.
+- **Phase 3.1 — `sync_all` → `sync_data`**: 5M ran clean, 40M crashed. Compactor reads via O_DIRECT immediately after flush; `fdatasync` skips metadata updates that O_DIRECT read-after-write needs. Reverted; see TODO.md for the full crash log.
+- **Phase 2.4-workerpool (Commit 1)**: -12.7% at W=1 alone. The `reserve(size) + fill_at(pos, ...)` API is correct but the split adds enough branch overhead at W=1 to cost ~13% by itself. Reverted; led directly to the Phase 2.4-v2 indexer-only design.
+
+---
+
+## Repo layout
 
 ```
 SkippyDB/
-├── qmdb/                          # Core library
+├── qmdb/                          # core library (crate name: skippydb)
 │   ├── src/
 │   │   ├── lib.rs                 # AdsCore, AdsWrap, ADS trait
-│   │   ├── config.rs              # Configuration struct
-│   │   ├── def.rs                 # Constants (SHARD_COUNT, TWIG_SHIFT, etc.)
-│   │   ├── entryfile/
-│   │   │   ├── entry.rs           # Entry, EntryBz, EntryVec
-│   │   │   ├── entrybuffer.rs     # Lock-free entry buffer (updater → flusher)
-│   │   │   ├── entrycache.rs      # In-memory entry cache
-│   │   │   └── entryfile.rs       # HPFile-backed entry storage
+│   │   ├── config.rs              # Configuration
+│   │   ├── topology.rs            # Runtime Topology { shard_count, workers_per_shard }
+│   │   ├── def.rs                 # Constants (TWIG_SHIFT, FIRST_LEVEL_ABOVE_TWIG, ...)
+│   │   ├── entryfile/             # Entry, EntryBz, EntryBuffer, EntryFile
 │   │   ├── merkletree/
-│   │   │   ├── tree.rs            # Tree, UpperTree, NodePos
-│   │   │   ├── twig.rs            # Twig, ActiveBits, TwigMT
-│   │   │   ├── twigfile.rs        # HPFile-backed twig storage
-│   │   │   ├── proof.rs           # ProofPath, ProofNode
-│   │   │   └── recover.rs         # Tree recovery from SSD + MetaDB
-│   │   ├── indexer/
-│   │   │   ├── inmem.rs           # In-memory B-tree indexer
-│   │   │   └── hybrid/            # SSD-backed hybrid indexer
-│   │   ├── gpu/                   # CUDA acceleration (feature = "cuda")
-│   │   │   ├── gpu_hasher.rs      # GpuHasher, MultiGpuHasher
-│   │   │   └── sha256_kernel.cu   # CUDA SHA256 kernels
+│   │   │   ├── tree.rs            # Tree, UpperTree, NodePos, sync_upper_nodes_gpu*
+│   │   │   ├── twig.rs            # Twig, ActiveBits, TwigMT, sync_l1/l2/l3/top
+│   │   │   ├── twigfile.rs
+│   │   │   ├── proof.rs
+│   │   │   ├── recover.rs
+│   │   │   └── check.rs           # check_twig, check_upper_nodes, check_hash_consistency
+│   │   ├── indexer/               # in-mem B-tree + SSD-backed hybrid
+│   │   ├── gpu/                   # CUDA kernels (feature = "cuda")
+│   │   │   ├── gpu_hasher.rs      # GpuHasher, MultiGpuHasher, dispatch threshold
+│   │   │   ├── gpu_node_store.rs  # GPU-resident node store (flash-map)
+│   │   │   └── *.cu               # SHA256 / Blake3 kernels
 │   │   ├── seqads/                # Sequential ADS for stateless validation
-│   │   ├── stateless/             # Stateless validation support
+│   │   ├── stateless/
 │   │   ├── tasks/                 # Task, TaskHub, BlockPairTaskHub
-│   │   ├── flusher.rs             # Flusher pipeline stage
-│   │   ├── updater.rs             # Updater pipeline stage
-│   │   ├── compactor.rs           # Background compaction
-│   │   ├── metadb.rs              # Custom two-file ping-pong metadata store
-│   │   └── utils/                 # Hasher, changeset, helpers
-│   ├── examples/
-│   │   ├── v2_demo.rs             # Basic usage example
-│   │   └── v1_fuzz/               # Fuzz testing example
-│   └── benches/
-│       └── hash_benchmarks.rs     # Criterion benchmarks
+│   │   ├── flusher.rs             # 8-job flusher pipeline + Phase 0 trace + env gates
+│   │   ├── updater.rs             # Updater + Phase 2.4-v2 worker pool
+│   │   ├── compactor.rs
+│   │   └── metadb.rs              # Custom 2-file ping-pong, MetaInfoV2 envelope
+│   └── tests/
+│       ├── sync_upper_nodes_parity.rs   # resident-vs-per-level Merkle root parity
+│       ├── active_bits_sync_parity.rs   # CPU-vs-GPU phase1+phase2 active-bits parity
+│       ├── twig_sync_parity.rs          # CPU-vs-GPU twig MT sync parity
+│       ├── cpu_gpu_sha256_parity.rs     # CPU-vs-GPU SoA SHA256 parity
+│       ├── metadb_topology_roundtrip.rs # parametric shard-count roundtrip
+│       └── blake3_kernel_parity.rs      # parked Blake3 CUDA kernel parity
 ├── hpfile/                        # Head-prunable file library
-│   └── src/
-│       └── lib.rs                 # HPFile, PreReader, TempDir
-├── bench/                         # Performance benchmarking suite
-│   └── src/
-│       └── bin/speed.rs           # speed benchmark binary
-└── docs/
-    ├── architecture.md            # Internal architecture deep-dive
-    ├── design.md                  # Design document / whitepaper notes
-    └── gpu-acceleration.md        # GPU acceleration guide
+├── flash-map/                     # GPU-resident hash map (vendored)
+├── bench/                         # speed binary + bench/results/
+└── docs/                          # architecture / gpu / design notes
 ```
-
----
-
-## Examples
-
-### Basic Demo
-
-```bash
-cargo run --example v2_demo
-```
-
-Creates a database, inserts 100 key-value pairs across 10 tasks, flushes, and reads one back. See [`qmdb/examples/v2_demo.rs`](qmdb/examples/v2_demo.rs).
-
-### Fuzz Testing
-
-```bash
-cargo run --example v1_fuzz
-```
-
-Randomized CRUD operations against a reference database to verify correctness. See [`qmdb/examples/v1_fuzz/`](qmdb/examples/v1_fuzz/).
-
-### Indexer Stress Test
-
-```bash
-# Requires randsrc.dat:
-head -c 10M </dev/urandom > randsrc.dat
-cargo run --example v3_indexer
-```
-
-Stress-tests the hybrid indexer with millions of random operations. See [`qmdb/examples/v3_indexer.rs`](qmdb/examples/v3_indexer.rs).
 
 ---
 
 ## Benchmarking
 
-### Quick Benchmark
-
 ```bash
-head -c 10M </dev/urandom > randsrc.dat
-cargo run --release --bin speed -- --entry-count 4000000
+# Smoke / dev (5M is the smallest --entry-count that satisfies the bench's
+# blocks_for_db_population >= tps_blocks precondition with release defaults).
+cargo run --release --features cuda --bin speed -- --entry-count 5000000
+
+# Production-ish workload on a single host.
+cargo run --release --features cuda --bin speed -- --entry-count 40000000
+
+# Multi-billion. Adjust ops_per_block / tps_blocks for your hardware.
+cargo run --release --features cuda --bin speed -- \
+    --db-dir /mnt/nvme/QMDB \
+    --entry-count 7000000000 \
+    --ops-per-block 1000000 \
+    --hover-recreate-block 100 \
+    --hover-write-block 100 \
+    --hover-interval 1000 \
+    --tps-blocks 500
 ```
 
-### Hash Benchmarks (Criterion)
+Bench harness docs: [`bench/README.md`](bench/README.md).
+
+For Criterion-style hash microbenches:
 
 ```bash
-# CPU-only
-cargo bench --bench hash_benchmarks
-
-# With GPU
-cargo bench --bench hash_benchmarks --features cuda
-```
-
-### Running Tests
-
-```bash
-# All tests
-cargo nextest run
-
-# With GPU tests
-cargo test --features cuda -- gpu
-
-# Specific module
-cargo test -p qmdb --lib merkletree
+cargo bench --bench hash_benchmarks                  # CPU only
+cargo bench --bench hash_benchmarks --features cuda  # + GPU
 ```
 
 ---
 
-## Feature Flags
+## Testing
 
-| Feature | Default | Description |
+```bash
+cargo test --release --features cuda                 # full suite (4 parity gates included)
+cargo test --release --features cuda --test sync_upper_nodes_parity -- --nocapture
+cargo test --release --features cuda --lib gpu::     # GPU subset
+```
+
+The four parity tests
+([`sync_upper_nodes`, `cpu_gpu_sha256`, `twig_sync`,
+`active_bits_sync`](qmdb/tests/)) are gates: any future change to the
+upper-tree-sync, twig-sync, or active-bits-sync paths has to keep them
+green or the bug it would have introduced shows up immediately on the
+build.
+
+Two tests are intentionally `#[ignore]`'d
+(`test_full_pipeline_large_cpu_vs_gpu`,
+`test_twig_eviction_cpu_vs_gpu`) — they need the full
+`flush_files`/`flush_files_gpu` orchestration to migrate `new_twig_map`
+into `active_twig_shards`, which the partial-pipeline harness can't do.
+The active-bits parity they were trying to verify is covered properly
+by `qmdb/tests/active_bits_sync_parity.rs`.
+
+---
+
+## Feature flags
+
+| flag | default | what |
 |---|---|---|
-| `tikv-jemallocator` | Yes | Use jemalloc for better allocation performance |
-| `cuda` | No | Enable CUDA GPU-accelerated SHA256 hashing |
-| `directio` | No | Linux `io_uring`-based direct I/O |
-| `tee_cipher` | No | AES-256-GCM encryption for entries + index |
-| `use_hybridindexer` | No | Use SSD-backed hybrid indexer instead of in-memory |
-| `hpfile_all_in_mem` | No | Keep HPFile data entirely in memory (for testing) |
-| `slow_hashing` | No | Disable parallel hashing (for debugging) |
-| `in_sp1` | No | Build for SP1 zkVM target |
+| `tikv-jemallocator` | yes | jemalloc allocator |
+| `cuda` | no | CUDA SHA256 kernels |
+| `directio` | no | Linux `io_uring` direct I/O |
+| `tee_cipher` | no | AES-256-GCM encryption for entries + index |
+| `use_hybridindexer` | no | SSD-backed hybrid indexer |
+| `hpfile_all_in_mem` | no | Keep HPFile data entirely in memory (testing) |
+| `slow_hashing` | no | Disable parallel hashing (debug) |
+| `in_sp1` | no | Build for the SP1 zkVM |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on style, testing, and the pull request process.
-
 ```bash
-# Check formatting and lints
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
-
-# Run the full test suite
-cargo nextest run
+cargo test --release --features cuda
 ```
+
+PR checklist:
+
+- New code passes the parity gates above.
+- New on-disk format / consensus-affecting changes bump `META_MAGIC_V2`.
+- New env toggles documented in [Env toggles](#env-toggles).
+- Bench numbers backed by a JSON file in `bench/results/`.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the longer style + review notes.
 
 ---
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
+Dual-licensed under [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE).
 
+## Citation
+
+If you use SkippyDB in research, please cite the upstream QMDB paper:
+
+```bibtex
+@misc{qmdb2025,
+  title  = {QMDB: Quick Merkle Database},
+  author = {Layr Labs},
+  year   = {2025},
+  eprint = {2501.05262},
+  url    = {https://arxiv.org/pdf/2501.05262},
+}
+```
