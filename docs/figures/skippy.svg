@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" width="240" height="320" role="img" aria-label="Skippy the Magnificent: a tiny shiny beer can with eyes and a small crown.">
+  <title>Skippy the Magnificent</title>
+  <desc>A stylized chrome beer can with two glowing eyes and a tiny crown floating above. ASCII text on the can reads "SKIPPY". Lightning bolts on either side. Original SVG drawing.</desc>
+
+  <defs>
+    <linearGradient id="canBody" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"  stop-color="#5b6470"/>
+      <stop offset="20%" stop-color="#c8cdd3"/>
+      <stop offset="48%" stop-color="#f1f3f6"/>
+      <stop offset="55%" stop-color="#ffffff"/>
+      <stop offset="62%" stop-color="#f1f3f6"/>
+      <stop offset="80%" stop-color="#aab0b8"/>
+      <stop offset="100%" stop-color="#3e4651"/>
+    </linearGradient>
+
+    <linearGradient id="canTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#9aa1aa"/>
+      <stop offset="50%"  stop-color="#dde0e5"/>
+      <stop offset="100%" stop-color="#7a8089"/>
+    </linearGradient>
+
+    <linearGradient id="canBottom" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#7a8089"/>
+      <stop offset="100%" stop-color="#3e4651"/>
+    </linearGradient>
+
+    <radialGradient id="eyeGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#ffffff"/>
+      <stop offset="35%" stop-color="#7df9ff"/>
+      <stop offset="100%" stop-color="#0d6e8f"/>
+    </radialGradient>
+
+    <linearGradient id="crownFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#ffe27a"/>
+      <stop offset="100%" stop-color="#c89a1d"/>
+    </linearGradient>
+
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#fff7c0" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#fff7c0" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dx="0" dy="4" result="offset"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- starfield speckles -->
+  <g fill="#ffffff" opacity="0.6">
+    <circle cx="22"  cy="42"  r="1.2"/>
+    <circle cx="210" cy="60"  r="1.6"/>
+    <circle cx="38"  cy="280" r="1.4"/>
+    <circle cx="216" cy="265" r="1.0"/>
+    <circle cx="190" cy="20"  r="0.8"/>
+    <circle cx="60"  cy="14"  r="1.1"/>
+    <circle cx="120" cy="8"   r="0.9"/>
+  </g>
+
+  <!-- halo behind crown -->
+  <ellipse cx="120" cy="48" rx="60" ry="20" fill="url(#halo)"/>
+
+  <!-- crown -->
+  <g transform="translate(86,28)" filter="url(#softShadow)">
+    <path d="M0,30 L10,8 L22,22 L34,4 L46,22 L58,8 L68,30 Z"
+          fill="url(#crownFill)" stroke="#7c5400" stroke-width="1.5" stroke-linejoin="round"/>
+    <circle cx="10" cy="8"  r="2.2" fill="#ff6b6b" stroke="#7c5400" stroke-width="0.6"/>
+    <circle cx="34" cy="4"  r="2.5" fill="#5cd6ff" stroke="#0d6e8f" stroke-width="0.6"/>
+    <circle cx="58" cy="8"  r="2.2" fill="#74e07c" stroke="#1d6a23" stroke-width="0.6"/>
+    <rect x="0" y="28" width="68" height="4" fill="#c89a1d" stroke="#7c5400" stroke-width="1"/>
+  </g>
+
+  <!-- lightning bolts -->
+  <g fill="#ffe27a" stroke="#c89a1d" stroke-width="1.2" stroke-linejoin="round" filter="url(#softShadow)">
+    <path d="M28,150 L46,128 L40,150 L54,150 L34,184 L40,158 L26,158 Z"/>
+    <path d="M212,150 L194,128 L200,150 L186,150 L206,184 L200,158 L214,158 Z"/>
+  </g>
+
+  <!-- can group -->
+  <g filter="url(#softShadow)">
+    <!-- can body -->
+    <rect x="74" y="80" width="92" height="180" rx="6" ry="6" fill="url(#canBody)" stroke="#2a2f37" stroke-width="1.4"/>
+
+    <!-- top rim ellipse -->
+    <ellipse cx="120" cy="80" rx="46" ry="9" fill="url(#canTop)" stroke="#2a2f37" stroke-width="1.4"/>
+    <ellipse cx="120" cy="78" rx="38" ry="6" fill="none" stroke="#ffffff" stroke-width="0.8" opacity="0.7"/>
+
+    <!-- pull tab -->
+    <ellipse cx="120" cy="78" rx="14" ry="3.5" fill="#777e88" stroke="#2a2f37" stroke-width="0.8"/>
+    <ellipse cx="120" cy="78" rx="6"  ry="1.6" fill="#1c2129"/>
+
+    <!-- bottom rim ellipse -->
+    <ellipse cx="120" cy="260" rx="46" ry="9" fill="url(#canBottom)" stroke="#2a2f37" stroke-width="1.4"/>
+
+    <!-- vertical highlight -->
+    <rect x="102" y="86" width="8" height="168" fill="#ffffff" opacity="0.18" rx="3"/>
+
+    <!-- label band -->
+    <rect x="78" y="130" width="84" height="64" fill="#0d1424" stroke="#0a0e18" stroke-width="1"/>
+    <rect x="80" y="132" width="80" height="60" fill="none" stroke="#7df9ff" stroke-width="0.6" opacity="0.6"/>
+
+    <!-- eyes (cyan glow) -->
+    <circle cx="100" cy="156" r="9" fill="url(#eyeGlow)"/>
+    <circle cx="140" cy="156" r="9" fill="url(#eyeGlow)"/>
+    <circle cx="100" cy="156" r="3.4" fill="#0a1a22"/>
+    <circle cx="140" cy="156" r="3.4" fill="#0a1a22"/>
+    <!-- eye glints -->
+    <circle cx="98"  cy="153" r="1.2" fill="#ffffff"/>
+    <circle cx="138" cy="153" r="1.2" fill="#ffffff"/>
+
+    <!-- name plate -->
+    <text x="120" y="184" text-anchor="middle"
+          font-family="Menlo, Consolas, 'Courier New', monospace"
+          font-size="11" font-weight="700" fill="#7df9ff" letter-spacing="2">SKIPPY</text>
+
+    <!-- subtle scan-lines -->
+    <g stroke="#7df9ff" stroke-width="0.4" opacity="0.18">
+      <line x1="80" y1="138" x2="160" y2="138"/>
+      <line x1="80" y1="146" x2="160" y2="146"/>
+      <line x1="80" y1="172" x2="160" y2="172"/>
+      <line x1="80" y1="180" x2="160" y2="180"/>
+    </g>
+
+    <!-- ports -->
+    <g fill="#0a0e18" stroke="#2a2f37" stroke-width="0.8">
+      <rect x="86" y="216" width="20" height="6" rx="1.5"/>
+      <rect x="134" y="216" width="20" height="6" rx="1.5"/>
+      <circle cx="120" cy="219" r="2"/>
+    </g>
+  </g>
+
+  <!-- caption -->
+  <text x="120" y="304" text-anchor="middle"
+        font-family="Menlo, Consolas, 'Courier New', monospace"
+        font-size="9" fill="#aab0b8" letter-spacing="1">
+    THE MAGNIFICENT
+  </text>
+</svg>

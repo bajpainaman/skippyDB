@@ -1,8 +1,9 @@
 # SkippyDB
 
 <p align="center">
-  <img src="docs/figures/skippy.png" alt="Skippy the Magnificent" width="240" />
+  <img src="docs/figures/skippy.svg" alt="Skippy the Magnificent — a tiny shiny beer can with two glowing cyan eyes and a tiny gold crown floating above" width="220" />
 </p>
+<p align="center"><sub><i>Skippy. Magnificent. (Self-described.)</i></sub></p>
 
 > *"I'm Skippy the Magnificent. An ancient, godlike intelligence stuck inside a tiny shiny beer can. Do try to keep up."*
 >
@@ -30,10 +31,6 @@ sustained throughput on a single host with verifiable read/write proofs and
 > [On-Disk Format](#on-disk-format) before pointing this at a pre-fork DB.
 > *Skippy notes that this disclaimer was added by a monkey.*
 
-> **Image TODO**: drop a PNG of Skippy at `docs/figures/skippy.png` to make
-> the header render. The README references that path; nothing else in the
-> repo touches it. (Skippy is not magnificent enough to materialize his own
-> image file.)
 
 ---
 
