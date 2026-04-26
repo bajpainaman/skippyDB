@@ -130,19 +130,19 @@ matches 1.5% of (shard, height) root tuples across two runs. So the bench
 output cannot be used to verify A vs B parity. A unit-level deterministic
 parity test was needed.
 
-### Parity test (CRITICAL FINDING)
+### Parity test (RESOLVED — see fix below)
 
 `qmdb/tests/sync_upper_nodes_parity.rs` runs both paths over a fixed
-`build_test_tree` input and asserts equal roots. **It fails 100% of the time**:
-the two GPU paths produce different roots from the SAME input.
+`build_test_tree` input and asserts equal roots. As initially written it failed
+100% of the time:
 
 ```
 [no_deactivations] per-level = 78a40c70 2ff7655f d6b82230 ab93983a 469e270f 11391da5 3f83f303 552c69d7
 [no_deactivations] resident  = 98f8e27c 276a60e7 ae438172 550ffd76 fdf5ea67 e69fa92a c730dfdb 022923f1
 ```
 
-Tagged `#[ignore]` so CI stays green; reproduce with `cargo test --release
---features cuda --test sync_upper_nodes_parity -- --ignored --nocapture`.
+After the fix in `tree.rs` (see "Parity fix" below) both tests pass and
+the `#[ignore]` was removed.
 
 **Implications**:
 - Cannot flip the default. `SKIPPY_NO_GPU_RESIDENT=1` and the default produce
@@ -175,6 +175,29 @@ Tagged `#[ignore]` so CI stays green; reproduce with `cargo test --release
 production behavior). The env flag `SKIPPY_NO_GPU_RESIDENT=1` exists for
 debugging only — never set in production until parity test passes.
 
+### Parity fix (2026-04-26)
+
+Root cause: the resident path's populate phase (`tree.rs:614-619`) uploaded
+twig roots only for *active* twigs from `active_twig_shards`. The
+device-side fetch at `gpu_node_store.rs:113-123` (`bulk_get_device`)
+discards the "found" flag, so missing twig positions return uninitialized
+device memory. The per-level path (`tree.rs:521-527`) handles missing
+twigs explicitly via `unwrap_or(NULL_TWIG.twig_root)`.
+
+Fix: pre-fill `NULL_TWIG.twig_root` at every `(2*i, 2*i+1)` twig position
+in `n_list` BEFORE inserting active twig roots — the active inserts
+overwrite the NULL fill for any twig that exists. After this change, the
+parity test (`sync_upper_nodes_parity.rs`, both `with_deactivations` and
+`no_deactivations`) passes, and the resident path produces byte-identical
+roots to the per-level path.
+
+Outstanding: per-level remains ~28% faster than fixed-resident at 5M cuda
+under contention. The fix doesn't change per-level — only resident — so
+the perf gap is still real and the populate-phase still does O(active set)
+H→D work every block. Follow-up lever: incremental populate (only nodes
+that changed since last sync), with the parity test enforced as a hard
+gate so any future "optimization" can't silently regress correctness.
+
 ### Pre-existing CPU-vs-GPU test failures (corroborating evidence)
 
 `cargo test --release --features cuda` fails 10 tests at HEAD AND at the
@@ -193,12 +216,15 @@ gpu::integration_tests::tests::test_single_entry_cpu_vs_gpu
 gpu::integration_tests::tests::test_twig_eviction_cpu_vs_gpu
 ```
 
-All panic at `merkletree/check.rs:31` "Not Equal" — i.e. CPU and GPU paths
-produce different node hashes. **This is the same class of bug the parity
-test surfaces from a different angle.** The codebase has been carrying a
-known-broken GPU/CPU equivalence on the moonshot branch (and likely
-earlier). Whichever investigation resolves the resident-vs-per-level
-divergence likely also resolves these — the fix has high leverage.
+All panic at `merkletree/check.rs:31` "Not Equal". The 2026-04-26 parity
+fix above did NOT rescue any of these — they fail at `check_hash_consistency`
+which validates `twig.active_bits_mtl1` (set by `sync_l1`/`sync_l2`/`sync_l3`/
+`sync_top`, a separate active-bits Merkle code path) rather than the
+upper-tree-sync path the parity test exercises. So these are a SEPARATE
+bug class, not the same as the one the parity fix addresses. Investigation
+hook: compare `active_bits_mtl1[0]` against `hasher::hash1(8, active_bits.get_bits(0, 64))`
+(the assertion in `check.rs:88-91`) on a CPU vs GPU side and find where
+the bits or hash differ.
 
 ## Phase 4 Blake3 probe — FAILED (-13.9% at 40M cuda)
 

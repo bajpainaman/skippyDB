@@ -10,15 +10,20 @@
 //! 1.5% of (shard, height) tuples across two runs), so this test drives both
 //! paths from a fixed in-memory entry sequence built via `build_test_tree`.
 //!
-//! ## Status: KNOWN-FAILING
+//! ## History
 //!
-//! As of 2026-04-26, both paths produce different roots from the same input.
-//! The newer resident path (commit `00df50b` "integrate flash-map GPU-resident
-//! hash map") diverges from the older per-level path (commit `8750d7d`
-//! "GPU-accelerated SHA256 batch hashing"). Tagged `#[ignore]` so CI stays
-//! green; run via `cargo test --release --features cuda --test
-//! sync_upper_nodes_parity -- --ignored --nocapture`. See TODO.md
-//! "Phase 0 second capture" for the open investigation.
+//! 2026-04-26: introduced as `#[ignore]` known-failing — the resident path
+//! diverged from per-level on this fixed input. Root cause: the resident
+//! path's populate phase (tree.rs:614-619) only uploaded twig roots from
+//! `active_twig_shards`, but `sync_level_on_device`'s `bulk_get_device`
+//! discards the "found" flag, so missing twig positions returned garbage.
+//! The per-level path falls back to `NULL_TWIG.twig_root` for missing
+//! twigs (tree.rs:521-527).
+//!
+//! Fix: pre-fill `NULL_TWIG.twig_root` at every (2*i, 2*i+1) twig position
+//! in `n_list` before uploading active twig roots, so missing twigs return
+//! the correct sentinel. Both tests pass after the fix; kept enabled so a
+//! future regression in either path is caught immediately.
 
 #![cfg(feature = "cuda")]
 
@@ -82,7 +87,6 @@ fn hex(b: &[u8; 32]) -> String {
 }
 
 #[test]
-#[ignore = "known-failing: resident vs per-level diverge — see TODO.md"]
 #[serial]
 fn sync_upper_nodes_parity_no_deactivations() {
     run_parity(
@@ -94,7 +98,6 @@ fn sync_upper_nodes_parity_no_deactivations() {
 }
 
 #[test]
-#[ignore = "known-failing: resident vs per-level diverge — see TODO.md"]
 #[serial]
 fn sync_upper_nodes_parity_with_deactivations() {
     run_parity(
